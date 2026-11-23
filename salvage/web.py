@@ -1,7 +1,10 @@
 """Локальный веб-пульт: python -m salvage.web [--port 8741]
 
-Без фреймворков (http.server). Слушает 0.0.0.0 для live-preview в песочнице.
-Все данные остаются на машине. Стиль — намеренно «терминальный», не дашборд.
+Без фреймворков (http.server). По умолчанию слушает 127.0.0.1: пульт локальный
+и не должен торчать в сеть сам по себе. ``--host 0.0.0.0`` — только явно
+(нужно, например, для live-preview в песочнице).
+Страница автономна: ни одного внешнего <script>/<link>/src=http — иначе пульт
+ломается без интернета и стучится наружу. Стиль — намеренно «терминальный».
 """
 from __future__ import annotations
 
@@ -208,12 +211,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="salvage.web")
     ap.add_argument("--port", type=int, default=8741)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="127.0.0.1 по умолчанию; 0.0.0.0 — только осознанно")
     ap.add_argument("--path", default="", help="предзаполнить путь")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"salvage web: http://{args.host}:{args.port}  (Ctrl+C — остановить)", flush=True)
     try:
