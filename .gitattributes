@@ -1,0 +1,17 @@
+# Windows-скрипты обязаны приезжать с CRLF, иначе cmd ломает разбор строк
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# скрипты для sh обязаны иметь LF
+*.sh text eol=lf
+
+# тестовые фикстуры — бинарные, git не должен их трогать
+*.pak binary
+*.win binary
+*.bnk binary
+*.pck binary
+*.rgssad binary
+*.rgss2a binary
+*.rgss3a binary
+*.wem binary
+*.ogg binary
+*.png binary

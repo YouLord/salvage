@@ -54,16 +54,25 @@ python -m salvage.web --port 8741
 
 ## Публикация на GitHub
 
-```bash
-bash push-to-github.sh                      # спросит токен только если нужен
-GH_USER=YouLord GH_TOKEN=ghp_xxx bash push-to-github.sh   # без вопросов
-bash push-to-github.sh --dry-run            # показать шаги, ничего не менять
+**Windows** — двойной клик по `push-to-github.bat` (или из консоли):
+
+```bat
+push-to-github.bat
 ```
 
-Скрипт сам: проверит чистое дерево, поставит автора коммитов, настроит
-`origin` и ветку `main`, разберётся с автогенерируемым `Initial commit`
-GitHub (наш README остаётся нашим), откажется форсить чужие файлы и
-проверит пуш через `git ls-remote`. Токен в конфиг не пишется.
+**Linux / macOS / Git Bash:**
+
+```bash
+bash push-to-github.sh
+GH_USER=YouLord GH_TOKEN=ghp_xxx bash push-to-github.sh   # без вопросов
+bash push-to-github.sh --dry-run                          # показать шаги
+```
+
+Оба скрипта: ставят автора коммитов (если git его не знает), настраивают
+`origin` и ветку `main`, разбираются с автогенерируемым `Initial commit`
+GitHub (наш README остаётся нашим), не форсят чужую работу и проверяют
+результат через `git ls-remote`. `.bat` — чистый ASCII с CRLF, иначе `cmd`
+ломает разбор; за это отвечает `.gitattributes`.
 
 ## Тесты
 
