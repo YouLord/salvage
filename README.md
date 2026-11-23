@@ -52,27 +52,6 @@ python -m salvage.web --port 8741
 
 Демо-отчёты по синтетическому стенду всех движков: `demo/index.html` (собирается `python build_demo.py`).
 
-## Публикация на GitHub
-
-**Windows** — двойной клик по `push-to-github.bat` (или из консоли):
-
-```bat
-push-to-github.bat
-```
-
-**Linux / macOS / Git Bash:**
-
-```bash
-bash push-to-github.sh
-GH_USER=YouLord GH_TOKEN=ghp_xxx bash push-to-github.sh   # без вопросов
-bash push-to-github.sh --dry-run                          # показать шаги
-```
-
-Оба скрипта: ставят автора коммитов (если git его не знает), настраивают
-`origin` и ветку `main`, разбираются с автогенерируемым `Initial commit`
-GitHub (наш README остаётся нашим), не форсят чужую работу и проверяют
-результат через `git ls-remote`. `.bat` — чистый ASCII с CRLF, иначе `cmd`
-ломает разбор; за это отвечает `.gitattributes`.
 
 ## Тесты
 
