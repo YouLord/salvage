@@ -130,7 +130,7 @@
 | **`schema_version` в `scan.json`** + политика совместимости | ✅ | `test_scan_json_has_schema_version`; политика — ниже |
 | **Веб-пульт/HTML:** автономность (без внешних http-ресурсов) | ✅ | `test_html_is_self_contained` |
 
-Итого тестов: `python -W ignore -m unittest discover -s tests` — **63 OK**.
+Итого тестов: `python -W ignore -m unittest discover -s tests` — **64 OK**.
 
 ### schema_version и обратная совместимость
 

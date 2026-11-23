@@ -13,6 +13,14 @@ HERE = Path(__file__).resolve().parent
 FIX = HERE / "fixtures"
 
 
+def _have_lz4() -> bool:
+    try:
+        import lz4.block  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 class TestUnrealLz4(unittest.TestCase):
     """LZ4-блоки в .pak (v8) + честные статусы для Oodle."""
 
@@ -50,6 +58,35 @@ class TestUnrealLz4(unittest.TestCase):
         data, status = unreal_pak.read_entry_data(pak, e)
         self.assertIsNone(data)
         self.assertEqual(status, "unsupported:oodle")
+
+
+class TestUnrealLz4MissingModule(unittest.TestCase):
+    """Без python-lz4 модуль не имеет права выдавать «похожие байты».
+
+    Статус обязан быть unsupported:lz4-python-missing, данные — None.
+    """
+
+    def test_missing_lz4_is_honest_status(self) -> None:
+        from unittest import mock
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name.startswith("lz4"):
+                raise ImportError("lz4 отключён в тесте")
+            return real_import(name, *args, **kwargs)
+
+        fix = FIX / "ue_lz4"
+        expected = json.loads((fix / "expected_lz4.json").read_text("utf-8"))
+        if not expected["lz4_available"]:
+            self.skipTest("фикстура собрана без lz4 — нечего проверять")
+        pak = unreal_pak.read_pak(fix / "pakchunk0-WindowsNoEditor.pak")
+        lz4_entry = next(e for e in pak.entries if e.compression == "lz4")
+        with mock.patch("builtins.__import__", side_effect=fake_import):
+            data, status = unreal_pak.read_entry_data(pak, lz4_entry)
+        self.assertIsNone(data, "без декодера данные подменяться не должны")
+        self.assertEqual(status, "unsupported:lz4-python-missing")
 
 
 if __name__ == "__main__":
