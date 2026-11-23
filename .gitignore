@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+demo/
+tests/fixtures/
+.pytest_cache/
+salvage-report/
+unpacked/

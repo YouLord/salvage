@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "salvage"
+version = "0.1.0"
+description = "Аудит и восстановление ассетов игр: Unity, Godot, GameMaker, RPG Maker, Ren'Py"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Salvage contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+unity = ["UnityPy>=1.20"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+salvage = "salvage.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["salvage*"]
