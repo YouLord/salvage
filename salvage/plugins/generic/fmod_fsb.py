@@ -15,6 +15,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...core import ogg
+
 FSB5_MAGIC = b"FSB5"
 FSB4_MAGIC = (b"FSB4", b"FSB3")
 AKPK_MAGIC = b"AKPK"
@@ -93,36 +95,41 @@ def read_fsb5(path: Path) -> FsbFile:
         raise FsbError("не FSB5")
     (version, num_samples, shdr_size, name_size, data_size, mode) = \
         struct.unpack_from("<iiiiii", data, 4)
-    header_end = 60
+    # vgmstream: FSB5 v0 — 0x40 байт заголовка, v1 — 0x3C (есть флаги на 0x20)
+    header_end = 0x3C if version == 1 else 0x40
+    if len(data) < header_end:
+        raise FsbError("обрезанный заголовок FSB5")
     data_start = header_end + shdr_size + name_size
     name_table = data[header_end + shdr_size: data_start]
+    if data_start > len(data):
+        raise FsbError("FSB5: заголовок/имена выходят за файл")
     samples = _read_fsb5_headers(data, header_end, num_samples, data_start)
-    # имена: нулевые строки, могут идти с 4-байтным выравниванием
-    names = [n for n in name_table.split(b"\x00") if n]
+    # имена: таблица = uint32 offsets[], каждый офсет от начала name_table
+    names = _read_name_table(name_table, len(samples))
     for i, s in enumerate(samples):
-        if i < len(names):
-            s.name = names[i].decode("utf-8", "replace")
-        if not s.name:
-            s.name = f"sample_{i:03d}"
+        s.name = names[i] if i < len(names) and names[i] else f"sample_{i:03d}"
     return FsbFile(path=path, version=f"FSB5 v{version}", samples=samples)
 
 
 def _read_fsb5_headers(data: bytes, p: int, count: int, data_start: int) -> list[FsbSample]:
-    """FSB5: данные сэмплов лежат в data-секции; смещения в заголовке — от её начала,
-    умноженные на 16 (точность 16 байт)."""
+    """FSB5: заголовок сэмпла — одно 64-битное поле + цепочка чанков.
+
+    Раскладка (vgmstream/fsb5.c): биты 0 — extra-флаг, 1..5 — частота,
+    6..7 — код каналов (0→1, 1→2, 2→6, 3→8), 8..33 — смещение данных
+    в единицах по 32 байта от начала data-секции, 34..63 — число сэмплов.
+    """
     samples: list[FsbSample] = []
     for i in range(count):
         if p + 8 > len(data):
             break
-        b0 = data[p]
-        has_extra = b0 & 1
-        freq_code = (b0 >> 1) & 0x0F
-        two_ch = (b0 >> 5) & 1
-        data_off_units = struct.unpack_from("<I", data, p)[0] >> 6
-        p += 4
-        n_samples = struct.unpack_from("<I", data, p)[0] & 0x3FFFFFFF
-        p += 4
-        channels = 1 + two_ch
+        mode = struct.unpack_from("<Q", data, p)[0]
+        p += 8
+        has_extra = mode & 1
+        freq_code = (mode >> 1) & 0x0F
+        ch_code = (mode >> 5) & 0x03
+        data_off_units = (mode >> 7) & 0x07FFFFFF
+        n_samples = (mode >> 34) & 0x3FFFFFFF
+        channels = {0: 1, 1: 2, 2: 6, 3: 8}[ch_code]
         frequency = FREQS.get(freq_code, 44100)
         vorbis_setup = None
         loop_start = loop_end = 0
@@ -147,7 +154,7 @@ def _read_fsb5_headers(data: bytes, p: int, count: int, data_start: int) -> list
                     vorbis_setup = chunk[8:]
         samples.append(FsbSample(
             index=i, name="", codec=0, channels=channels, frequency=frequency,
-            samples=n_samples, data_offset=data_start + data_off_units * 16,
+            samples=n_samples, data_offset=data_start + data_off_units * 32,
             data_size=0, loop_start=loop_start, loop_end=loop_end,
             vorbis_setup=vorbis_setup))
     # размер данных = следующий offset минус текущий (последний — до конца файла)
@@ -157,6 +164,23 @@ def _read_fsb5_headers(data: bytes, p: int, count: int, data_start: int) -> list
         else:
             s.data_size = max(0, len(data) - s.data_offset)
     return samples
+
+
+def _read_name_table(table: bytes, count: int) -> list[str]:
+    """Таблица имён FSB5: count × uint32 offset от начала таблицы, строки с NUL."""
+    names: list[str] = []
+    if len(table) < 4 * count:
+        raw = [n for n in table.split(b"\x00") if n]
+        return [n.decode("utf-8", "replace") for n in raw][:count]
+    for i in range(count):
+        off = struct.unpack_from("<I", table, i * 4)[0]
+        if off >= len(table):
+            names.append("")
+            continue
+        end = table.find(b"\x00", off)
+        end = len(table) if end < 0 else end
+        names.append(table[off:end].decode("utf-8", "replace"))
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -190,20 +214,146 @@ def read_fsb4(path: Path) -> FsbFile:
 # Восстановление Vorbis (FSB5) в OggS
 # ---------------------------------------------------------------------------
 
-def build_ogg(sample: FsbSample, payload: bytes) -> bytes | None:
-    """Собрать Ogg-поток из Vorbis-сэмпла FSB5.
+# Блоксайзы Vorbis НЕ хранятся ни в FSB5, ни в setup-заголовке: в
+# идентификационном заголовке они обязаны совпадать с теми, которыми кодировали.
+# FMOD-кодер исторически пишет 256/2048 (0x8B), но чужие банки бывают другими,
+# поэтому кандидатов проверяем реальным декодером (см. build_ogg_verified).
+DEFAULT_BLOCKSIZE = 0x8B
+BLOCKSIZE_CANDIDATES = (0x8B, 0x9A, 0xA9, 0x98, 0x89, 0xAA, 0x9B, 0x8A, 0xB8, 0xBB, 0x88, 0x99)
 
-    FSB5 хранит для Vorbis только аудиопакеты, а идентификационный и
-    setup-заголовки лежат в чанке VORBISDATA. Валидный Ogg требует CRC и
-    правильной структуры страниц, поэтому полноценная сборка — в roadmap.
-    Здесь отдаём «сырой» контейнер с идентификатором, чтобы данные не терялись.
+
+def _ident_header(channels: int, frequency: int, blocksize: int) -> bytes:
+    """Идентификационный заголовок Vorbis (30 байт)."""
+    return struct.pack("<B6sIBIiiiBB", 1, b"vorbis", 0, max(1, channels),
+                       frequency & 0xFFFFFFFF, 0, 0, 0, blocksize, 1)
+
+
+def vorbis_headers(sample: FsbSample,
+                   blocksize: int = DEFAULT_BLOCKSIZE) -> tuple[bytes, bytes, bytes] | None:
+    """Три Vorbis-заголовка из FSB5: identification, comment, setup.
+
+    FSB5 хранит только аудиопакеты; identification/setup лежат в чанке
+    VORBISDATA (setup — после 8-байтного заголовка id+size). Comment
+    восстанавливаем пустой — это стандартный и допустимый вариант.
     """
-    if sample.vorbis_setup is None:
+    setup_blob = sample.vorbis_setup
+    if not setup_blob:
         return None
-    setup = sample.vorbis_setup
-    ident = struct.pack("<B4sIBBII", 1, b"vorbis", 0, sample.channels,
-                        sample.frequency, 0, 0)
-    return b"OggS\x00salvage-fsb5-raw\x00" + ident + setup + payload
+    if len(setup_blob) < 4:
+        return None
+    # setup_blob = [uint32 packet len?] + packet — в большинстве FSB5 длина уже отрезана
+    setup = setup_blob
+    if setup[:1] != b"\x05":
+        if setup_blob[:1] == b"\x05":
+            setup = setup_blob
+        else:
+            # некоторые паковщики оставляют 4-байтный префикс длины
+            cand = setup_blob[4:] if setup_blob[4:5] == b"\x05" else setup_blob
+            setup = cand
+    if setup[:1] != b"\x05":
+        return None
+    if (blocksize & 0xF) == 0 or (blocksize >> 4) == 0:
+        blocksize = DEFAULT_BLOCKSIZE
+    ident = _ident_header(sample.channels, sample.frequency, blocksize)
+    vendor = b"salvage-fsb5"
+    comment = (b"\x03vorbis" + struct.pack("<I", len(vendor)) + vendor
+               + struct.pack("<I", 0) + b"\x01")
+    return ident, comment, setup
+
+
+def build_ogg(sample: FsbSample, payload: bytes,
+              blocksize: int = DEFAULT_BLOCKSIZE) -> bytes | None:
+    """Собрать валидный Ogg-Vorbis из Vorbis-сэмпла FSB5.
+
+    Возвращает None, если заголовки не восстановимы — вызывающий код обязан
+    отдать честный статус, а не «сырой» файл с расширением .ogg.
+    """
+    headers = vorbis_headers(sample, blocksize)
+    if headers is None:
+        return None
+    ident, comment, setup = headers
+    # аудиопакеты: FSB5 v1+ пишет 2-байтную длину перед каждым пакетом
+    packets = _split_fsb_vorbis_packets(payload)
+    if not packets:
+        return None
+    # Все аудиопакеты — на одной странице: тогда granule = точное число
+    # сэмплов (FMOD уже посчитал его в sample.samples). Дробить на страницы с
+    # выдуманными granule нельзя: декодер обрежет поток по последнему granule.
+    total = max(0, sample.samples)
+    try:
+        return ogg.build_stream([ident, comment, setup] + packets,
+                                serial=(sample.index * 2654435761 + 0x5A4C) & 0xFFFFFFFF,
+                                granules=[total], page_packets=0)
+    except ValueError:
+        return None
+
+
+def _probe_decoder():
+    """Опциональный декодер для проверки результата (SOX/soundfile/libvorbis)."""
+    try:
+        import soundfile  # type: ignore
+        return soundfile
+    except Exception:
+        return None
+
+
+def build_ogg_verified(sample: FsbSample, payload: bytes) -> dict:
+    """Собрать Ogg и, если есть декодер, проверить что звук действительно звучит.
+
+    Возвращает {data|None, blocksize, verified, status}:
+      * verified=True  — декодер прочитал поток и в нём есть ненулевые сэмплы;
+      * verified=False — декодера нет; структура проверена (CRC/серийники/EOS),
+                         но звучание не подтверждено (честный статус в отчёте);
+      * data=None      — заголовки не восстановимы (вызывающий код пишет .wem
+                         и статус «raw», а не подсовывает битый .ogg).
+    """
+    sf = _probe_decoder()
+    best: bytes | None = None
+    chosen = DEFAULT_BLOCKSIZE
+    for bs in BLOCKSIZE_CANDIDATES:
+        data = build_ogg(sample, payload, blocksize=bs)
+        if data is None:
+            return {"data": None, "blocksize": None, "verified": False,
+                    "status": "headers-unrecoverable"}
+        if best is None:
+            best, chosen = data, bs
+        if sf is None:
+            break
+        try:
+            import io
+            pcm, _rate = sf.read(io.BytesIO(data), dtype="float32", always_2d=False)
+            peak = float(abs(pcm).max()) if len(pcm) else 0.0
+        except Exception:
+            continue
+        if peak > 1e-4:
+            return {"data": data, "blocksize": bs, "verified": True, "status": "ok"}
+    if sf is None:
+        # структура валидна, но звук не проверен: говорим об этом прямо
+        return {"data": best, "blocksize": chosen, "verified": False,
+                "status": "structural-only"}
+    # декодер есть, но все кандидаты дали тишину — честный отказ от .ogg
+    return {"data": None, "blocksize": None, "verified": False,
+            "status": "decode-silent"}
+
+
+def _split_fsb_vorbis_packets(payload: bytes) -> list[bytes]:
+    """Аудиопакеты FSB5-Vorbis: [uint16 len][vorbis-пакет]..., нулевая длина — конец."""
+    out: list[bytes] = []
+    p = 0
+    n = len(payload)
+    while p + 2 <= n:
+        size = struct.unpack_from("<H", payload, p)[0]
+        p += 2
+        if size == 0:
+            break
+        if p + size > n:
+            break
+        out.append(payload[p:p + size])
+        p += size
+    if not out:
+        # некоторые банки хранят пакеты без префиксов: тогда отдаём как один пакет
+        out = [payload] if payload else []
+    return out
 
 
 def read_fsb(path: Path) -> FsbFile:
@@ -218,11 +368,11 @@ def read_fsb(path: Path) -> FsbFile:
 
 
 def _apply_mode(path: Path, fsb: FsbFile) -> None:
-    """Кодек задаётся полем mode в заголовке, накладываем на все сэмплы."""
+    """Кодек задаётся полем mode в заголовке (смещение 0x18), накладываем на все сэмплы."""
     try:
         with open(path, "rb") as f:
-            head = f.read(28)
-        mode = struct.unpack_from("<I", head, 24)[0] & 0x1FF
+            head = f.read(0x1C)
+        mode = struct.unpack_from("<I", head, 0x18)[0] & 0x1FF
     except (OSError, struct.error):
         return
     for s in fsb.samples:
