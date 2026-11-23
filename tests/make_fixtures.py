@@ -559,6 +559,12 @@ def make_rpgmaker_xp(root: Path) -> None:
     mapinfo = [None, {"id": 1, "name": "Деревня", "order": 1}]
     (data_dir / "MapInfos.rvdata2").write_bytes(rm.json_to_marshal(mapinfo))
 
+    # эталоны для байт-в-байт проверки расшифровки
+    import hashlib as _hashlib
+    (root / "expected_rgss.json").write_text(json.dumps(
+        {name: _hashlib.sha256(data).hexdigest() for name, data in files},
+        ensure_ascii=False, indent=1), "utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Unreal .pak (v3)
@@ -595,6 +601,10 @@ def make_unreal_pak(root: Path) -> None:
     blob += struct.pack("<I", 0x5A6F12E1) + struct.pack("<I", 3)
     blob += struct.pack("<QQ", index_off, len(index)) + b"\x00" * 20
     (root / "pakchunk0-WindowsNoEditor.pak").write_bytes(blob)
+    import hashlib as _hashlib
+    (root / "expected.json").write_text(json.dumps(
+        {name: _hashlib.sha256(data).hexdigest() for name, data in files},
+        ensure_ascii=False, indent=1), "utf-8")
 
 
 # ---------------------------------------------------------------------------

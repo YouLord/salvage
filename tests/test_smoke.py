@@ -150,6 +150,94 @@ class TestFixtures(unittest.TestCase):
         self.assertEqual(man["shaders"], ["sh_pass"])
         self.assertTrue((out / "strings.txt").is_file())
 
+    # --- точность 0.2: байт-в-байт ------------------------------------------
+    def test_gm_texture_qoi_roundtrip_exact(self) -> None:
+        """Страница tex_001 (QOI) должна дать ровно тот RGBA, что был закодирован."""
+        from salvage.core import imaging
+        plugin = self.reg["gamemaker"]
+        ds = plugin.scan(FIX / "gm", EngineContext(deep=True, log=lambda m: None))
+        out = self.tmp / "gm_exact"
+        plugin.extract(ds, out, EngineContext(log=lambda m: None))
+        png = out / "textures" / "tex_001.png"
+        self.assertTrue(png.is_file(), "страница 1 должна быть извлечена")
+        w, h, rgba = imaging.to_rgba(png.read_bytes())
+        self.assertEqual((w, h), (16, 16))
+        expected = bytearray()
+        for y in range(16):
+            for x in range(16):
+                expected += bytes(((x * 7 + y * 11 + 2) & 0xFF, (x * 3) & 0xFF,
+                                   (y * 5) & 0xFF, 255))
+        self.assertEqual(bytes(rgba), bytes(expected), "QOI-декодер не должен терять пиксели")
+
+    def test_gm_sprite_frames_byte_exact(self) -> None:
+        """Кадр спрайта == rect со страницы (PNG декодируется в те же пиксели)."""
+        from salvage.core import imaging
+        plugin = self.reg["gamemaker"]
+        ds = plugin.scan(FIX / "gm", EngineContext(deep=True, log=lambda m: None))
+        out = self.tmp / "gm_frames"
+        plugin.extract(ds, out, EngineContext(log=lambda m: None))
+        frame = out / "sprites" / "spr_player_00.png"
+        self.assertTrue(frame.is_file())
+        fw, fh, frgba = imaging.to_rgba(frame.read_bytes())
+        self.assertEqual((fw, fh), (16, 16))
+        page = out / "textures" / "tex_000.png"
+        pw, ph, prgba = imaging.to_rgba(page.read_bytes())
+        # rect (0,0,16,16) первой страницы
+        crop = bytearray()
+        for y in range(16):
+            start = (y * pw + 0) * 4
+            crop += prgba[start:start + 16 * 4]
+        self.assertEqual(bytes(frgba), bytes(crop))
+
+    def test_gm_texture_export_formats(self) -> None:
+        from salvage.core import imaging
+        plugin = self.reg["gamemaker"]
+        ds = plugin.scan(FIX / "gm", EngineContext(deep=True, log=lambda m: None))
+        for fmt, suffix, magic in (("qoi", ".qoi", b"qoif"), ("bz2", ".qoi.bz2", b"BZh")):
+            with self.subTest(fmt=fmt):
+                out = self.tmp / f"gm_{fmt}"
+                ctx = EngineContext(log=lambda m: None)
+                ctx.keys["texture_format"] = fmt
+                plugin.extract(ds, out, ctx)
+                files = sorted((out / "textures").glob("*" + suffix))
+                self.assertTrue(files, f"нет файлов *{suffix}")
+                raw = files[0].read_bytes()
+                self.assertTrue(raw.startswith(magic))
+                if fmt == "bz2":
+                    raw = __import__("bz2").decompress(raw)
+                w, h, rgba = imaging.decode_qoi(raw)
+                self.assertGreater(w, 0)
+
+    def test_rgss_v1_byte_exact(self) -> None:
+        """sha256 расшифрованного файла совпадает с зашифрованным на этапе сборки стенда."""
+        import io
+        import hashlib
+        from salvage.plugins.rpgmaker.plugin import parse_rgss_entries, extract_rgss_file
+        path = FIX / "rm_xp" / "Game.rgssad"
+        expected = json.loads((FIX / "rm_xp" / "expected_rgss.json").read_text("utf-8"))
+        with open(path, "rb") as f:
+            entries = parse_rgss_entries(f, 1)
+            self.assertIsNotNone(entries)
+            by_name = {e["name"]: e for e in entries}
+            for name, sha in expected.items():
+                self.assertIn(name, by_name, f"нет записи {name}")
+                data = extract_rgss_file(f, {"rgss_offset": by_name[name]["offset"],
+                                             "rgss_key": by_name[name]["key"],
+                                             "rgss_size": by_name[name]["size"]})
+                self.assertIsNotNone(data, name)
+                self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
+
+    def test_ue_pak_byte_exact(self) -> None:
+        import hashlib
+        dataset = self.reg["generic"].scan(FIX / "ue", EngineContext(deep=False, log=lambda m: None))
+        out = self.tmp / "ue_exact"
+        self.reg["generic"].extract(dataset, out, EngineContext(log=lambda m: None))
+        expected = json.loads((FIX / "ue" / "expected.json").read_text("utf-8"))
+        for name, sha in expected.items():
+            p = out / "pak" / "pakchunk0-WindowsNoEditor" / name
+            self.assertTrue(p.is_file(), name)
+            self.assertEqual(hashlib.sha256(p.read_bytes()).hexdigest(), sha, name)
+
     # --- Unity: deep-скан не должен ронять процесс --------------------------
     def test_unity_deep_degrades_gracefully(self) -> None:
         # через оркестратор: он прогоняет анализаторы секретов/дубликатов
