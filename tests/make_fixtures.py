@@ -8,6 +8,11 @@
     python tests/make_fixtures.py                 # все стенды
     python tests/make_fixtures.py gm renpy        # только выбранные
     python tests/make_fixtures.py gm --bug        # стенд с регресс-кейсом
+    python tests/make_fixtures.py regress         # только регресс-фикстуры
+
+Регресс-фикстуры (``tests/fixtures_regress.py``) — маленькие «больные» игры:
+одна фикстура = один когда-то исправленный баг, строится без вызова
+разбираемого кода, чтобы не «поехать» вместе с ним.
 """
 from __future__ import annotations
 
@@ -33,6 +38,19 @@ MODULES = {
 }
 
 
+REGRESS = "regress"
+
+
+def build_regress(base: Path | None = None) -> list[Path]:
+    import fixtures_regress
+
+    root = Path(base or BASE)
+    built = []
+    for rel, fn in fixtures_regress.BUILDERS.items():
+        built.append(fn(root / rel))
+    return built
+
+
 def build_one(alias: str, *, with_bug: bool = False, base: Path | None = None) -> Path:
     mod = importlib.import_module(MODULES[alias])
     root = Path(base or BASE) / alias
@@ -43,6 +61,14 @@ def main(argv: list[str] | None = None) -> None:
     argv = list(argv if argv is not None else sys.argv[1:])
     with_bug = "--bug" in argv
     argv = [a for a in argv if a != "--bug"]
+    if REGRESS in argv:
+        only = [a for a in argv if a != REGRESS]
+        base = Path(only[0]) if only else BASE
+        built = build_regress(base)
+        for path in built:
+            print(f"  regress   {path.relative_to(base)}")
+        print(f"Регресс-фикстуры: {len(built)} шт. в {base}")
+        return
     names = argv or list(MODULES)
     random.seed(42)
     BASE.mkdir(parents=True, exist_ok=True)

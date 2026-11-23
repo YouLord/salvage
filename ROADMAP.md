@@ -146,6 +146,27 @@
 
 ---
 
+## UE .pak v10+: где что лежит (проверено по rust-u4pak)
+
+Сверено по `src/index.rs`, `src/record.rs`, `src/pak.rs::header_size`,
+`src/unpack.rs::unpack_record`:
+
+* индекс v10: `mount | i32 count | u64 path_hash_seed | u32 has_path_hash
+  | u32 has_fdi | i64 fdi_off | i64 fdi_size | sha1[20] | i32 enc_size
+  | encoded_record_info | u32 file_count`;
+* **FDI — отдельный блок файла**, ссылки на него абсолютные
+  (`fdi_off` от начала файла), а не смещение внутри буфера индекса;
+* запись в индексе — компактная: `u32 битфилд (0-5 block_size<<11, 6-21
+  block_count, 22 enc, 23-28 метод, 29 size32, 30 unc32, 31 off32)`
+  + offset + uncompressed (+ size, если метод != 0) + размеры блоков;
+* **`offset` записи указывает на её заголовок, а данные — после него**;
+  прибавлять надо размер файлового заголовка (53 Б + 4 + 16×блоков),
+  а НЕ длину компактной записи из индекса — это разные числа (65 против 53).
+
+Закрыто регресс-фикстурой `tests/fixtures/regress/ue/regress_v10_fdi`
+(`tests/test_regress.py::TestUnrealV10`): битфилд + FDI из файла + побайтовая
+сверка извлечённых данных.
+
 ## RGSS: версии архива (проверено по эталонам)
 
 | Байт версии | Что это | Схема |

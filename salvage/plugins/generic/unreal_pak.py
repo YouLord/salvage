@@ -64,11 +64,20 @@ class PakEntry:
     # таблицу имён из footer (v8+), поэтому «0x10» само по себе ничего не значит.
     compression_name: str = ""
     header_size: int = 0        # размер сериализованного заголовка записи в индексе
+    #: Размер заголовка записи В ФАЙЛЕ — он больше, чем в индексе.
+    #: Для v1–v9 совпадает с header_size; для v10+ файловый заголовок —
+    #: 53 байта + 16 на блок (+4 при блоке) против компактной записи в индексе.
+    file_header_size: int = 0
 
     @property
     def data_offset(self) -> int:
-        """Данные начинаются ПОСЛЕ заголовка записи (offset указывает на заголовок)."""
-        return self.offset + self.header_size
+        """Данные начинаются ПОСЛЕ заголовка записи (offset указывает на заголовок).
+
+        Важно: прибавлять надо РАЗМЕР ЗАГОЛОВКА В ФАЙЛЕ, а не длину записи в
+        индексе — у v10+ это разные числа (сверено с rust-u4pak unpack.rs:
+        ``start_offset = record.offset() + header_size``).
+        """
+        return self.offset + (self.file_header_size or self.header_size)
 
     @property
     def compression(self) -> str:
@@ -197,7 +206,18 @@ def read_pak(path: Path) -> PakFile:
             index = zlib.decompress(index)
         except zlib.error:
             pass  # индекс может быть несжатым
-        mount, entries = _parse_index(index, version)
+        # v10+: FDI (Full Directory Index) — отдельный блок ФАЙЛА, ссылки на него
+        # абсолютные (сверено с rust-u4pak src/index.rs). Читаем его здесь.
+        fdi_blob = b""
+        if version >= 10:
+            try:
+                fdi_off, fdi_size = _peek_fdi_bounds(index)
+            except (struct.error, IndexError):
+                fdi_off = fdi_size = 0
+            if fdi_size > 0 and fdi_off + fdi_size <= path.stat().st_size:
+                f.seek(fdi_off)
+                fdi_blob = f.read(fdi_size)
+        mount, entries = _parse_index(index, version, fdi_blob)
         # Имя метода: v8+ — 0-based индекс в compression_names (0 = «нет сжатия»,
         # поэтому именам соответствуют индексы 1..N-1); v1–v7 — legacy-биты.
         for e in entries:
@@ -258,12 +278,34 @@ def _parse_entry(buf: bytes, p: int, version: int) -> tuple[PakEntry, int]:
         p += 4  # block size
     if version >= 4:
         p += 1  # unknown
+    # Файловый заголовок = ПОЛНЫЙ размер (53 + блоки), а p-start_p — это лишь
+    # длина компактной записи в индексе; складывать их нельзя (дало бы 65 вместо 53).
+    file_header_size = _v10_file_tail(method, blocks, encrypted)
     return PakEntry(name="", offset=offset, size=size, uncompressed=unc,
                     method=method, encrypted=encrypted, blocks=blocks,
-                    header_size=p - start_p), p
+                    header_size=p - start_p, file_header_size=file_header_size), p
 
 
-def _parse_index(index: bytes, version: int) -> tuple[str, list[PakEntry]]:
+def _peek_fdi_bounds(index: bytes) -> tuple[int, int]:
+    """Достать (offset, size) блока FDI из заголовка индекса v10+."""
+    p = 0
+    _, p = _read_fstring(index, p)
+    p += 4          # entry count
+    p += 8          # path hash seed
+    has_path_hash = struct.unpack_from("<I", index, p)[0]
+    p += 4
+    if has_path_hash:
+        p += 8 + 8 + 20
+    has_fdi = struct.unpack_from("<I", index, p)[0]
+    p += 4
+    if not has_fdi:
+        return 0, 0
+    fdi_off, fdi_size = struct.unpack_from("<qq", index, p)
+    return fdi_off, fdi_size
+
+
+def _parse_index(index: bytes, version: int,
+                 fdi_blob: bytes = b"") -> tuple[str, list[PakEntry]]:
     p = 0
     mount, p = _read_fstring(index, p)
     if 1 <= version <= 9:
@@ -299,22 +341,23 @@ def _parse_index(index: bytes, version: int) -> tuple[str, list[PakEntry]]:
 
     entries: list[PakEntry] = []
     if has_fdi and fdi_offset >= 0:
-        # FDI лежит отдельным блоком (обычно в конце индекса, вне сжатого enc)
-        fdi = index[fdi_offset - 0:fdi_offset + fdi_size] if fdi_offset + fdi_size <= len(index) else b""
-        fdi_p = fdi_offset if fdi_offset < len(index) else 0
-        try:
-            entries = _parse_fdi(index, fdi_p, enc_start, enc_size)
-        except (struct.error, IndexError):
-            entries = []
-    if not entries:
-        try:
-            entries = _parse_fdi(index, 0, enc_start, enc_size)
-        except (struct.error, IndexError):
-            entries = []
+        # FDI — отдельный блок: либо внутри буфера индекса, либо (обычно) в файле.
+        if fdi_offset + fdi_size <= len(index):
+            buf, base = index, fdi_offset
+        elif fdi_blob:
+            buf, base = fdi_blob, 0
+        else:
+            buf, base = b"", 0
+        if buf:
+            try:
+                entries = _parse_fdi(buf, base, enc_start, enc_size, index)
+            except (struct.error, IndexError):
+                entries = []
     return mount, entries
 
 
-def _parse_fdi(buf: bytes, p: int, enc_start: int, enc_size: int) -> list[PakEntry]:
+def _parse_fdi(buf: bytes, p: int, enc_start: int, enc_size: int,
+               enc_buf: bytes | None = None) -> list[PakEntry]:
     """Full Directory Index: каталоги → файлы → смещения в encoded entries."""
     entries: list[PakEntry] = []
     dir_count = struct.unpack_from("<I", buf, p)[0]
@@ -329,12 +372,30 @@ def _parse_fdi(buf: bytes, p: int, enc_start: int, enc_size: int) -> list[PakEnt
             p += 4
             full = (dir_name.rstrip("/") + "/" + file_name) if dir_name else file_name
             try:
-                e = decode_encoded_entry(buf, enc_start + enc_off)
+                e = decode_encoded_entry(enc_buf if enc_buf is not None else buf,
+                                         enc_start + enc_off)
             except struct.error:
                 continue
             e.name = full.lstrip("/")
             entries.append(e)
     return entries
+
+
+V3_RECORD_HEADER_SIZE = 53      # offset(8)+size(8)+unc(8)+method(4)+sha1(20)+enc(1)+block_size(4)
+
+
+def _v10_file_tail(method: int, blocks: list[tuple[int, int]], encrypted: bool) -> int:
+    """Размер файлового заголовка записи для v10+ (сверено с rust-u4pak pak.rs).
+
+    pak.rs::header_size для версий ≥ 3: базовые 53 байта (offset, size,
+    uncompressed, method, sha1, encrypted, block_size); если у записи есть
+    блоки сжатия — ещё 4 байта (block count) и по 16 на блок.
+    Компактная запись в ИНДЕКСЕ короче, поэтому здесь считается разница.
+    """
+    if method == 0:
+        return V3_RECORD_HEADER_SIZE
+    count = max(1, len(blocks))
+    return V3_RECORD_HEADER_SIZE + 4 + 16 * count
 
 
 def decode_encoded_entry(buf: bytes, p: int) -> PakEntry:
@@ -370,9 +431,12 @@ def decode_encoded_entry(buf: bytes, p: int) -> PakEntry:
     else:
         for _ in range(block_count):
             blocks.append((block_size, 0))
+    # Файловый заголовок = ПОЛНЫЙ размер (53 + блоки), а p-start_p — это лишь
+    # длина компактной записи в индексе; складывать их нельзя (дало бы 65 вместо 53).
+    file_header_size = _v10_file_tail(method, blocks, encrypted)
     return PakEntry(name="", offset=offset, size=size, uncompressed=unc,
                     method=method, encrypted=encrypted, blocks=blocks,
-                    header_size=p - start_p)
+                    header_size=p - start_p, file_header_size=file_header_size)
 
 
 # ---------------------------------------------------------------------------
