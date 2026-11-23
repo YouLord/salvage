@@ -159,45 +159,59 @@ fi
 # 6. Push по HTTPS с токеном, без интерактивных запросов
 # --------------------------------------------------------------------------
 say "6/7 push"
+
+# Стратегия: сначала пробуем без токена (сработает с ssh-remote, credential
+# helper или одноразовым токеном в URL). И только если GitHub отказал по
+# авторизации — просим токен и повторяем. Так скрипт не висит на вопросе,
+# когда авторизация и так настроена.
+push_with() {   # $1 — URL ("" = origin как есть)
+  if [ -n "$1" ]; then
+    GIT_TERMINAL_PROMPT=0 git push --set-upstream "$1" "$BRANCH"
+  else
+    GIT_TERMINAL_PROMPT=0 git push --set-upstream origin "$BRANCH"
+  fi
+}
+
 if [ "$DRY_RUN" = "1" ]; then
   echo "  [dry-run] push не выполняется"
   exit 0
 fi
 
-user="${GH_USER:-}"
-token="${GH_TOKEN:-}"
-if [ -z "$token" ]; then
-  # Если у пользователя настроен ssh-remote или credential helper — пробуем без токена
-  if git config --get credential.helper >/dev/null 2>&1; then
-    echo "  найден credential helper — пробую push без токена"
-  else
+err="$(mktemp)"
+if push_with "" 2>"$err"; then
+  rm -f "$err"
+else
+  echo "  без токена не вышло:"
+  sed -n '1,6p' "$err" | sed 's/^/    /'
+  user="${GH_USER:-}"
+  token="${GH_TOKEN:-}"
+  if [ -z "$token" ]; then
+    echo
     echo "  Токен: GitHub → Settings → Developer settings → Personal access tokens"
-    if [ -z "$user" ]; then read -r -p "  логин GitHub: " user; fi
-    read -r -s -p "  токен (ввод не отображается): " token; echo
+    echo "         (classic, scope \"repo\"); ввод не отображается"
+    if [ -z "$user" ]; then read -r -p "  логин GitHub: " user || true; fi
+    read -r -s -p "  токен: " token || true; echo
   fi
-fi
-
-push_url="$REPO_URL"
-if [ -n "$token" ]; then
+  [ -n "$token" ] || die "токен не введён — заливка отменена"
   proto="${REPO_URL%%://*}"
   rest="${REPO_URL#*://}"
   hostpath="${rest#*/}"
   host="${rest%%/*}"
   push_url="${proto}://${user:-x-access-token}:${token}@${host}/${hostpath}"
-fi
-
-# GIT_TERMINAL_PROMPT=0: не висеть на запросе пароля, а честно упасть
-if ! GIT_TERMINAL_PROMPT=0 git push --set-upstream "$push_url" "$BRANCH"; then
-  cat >&2 <<'HINT'
+  if ! push_with "$push_url" 2>"$err"; then
+    rm -f "$err"
+    cat >&2 <<'HINT'
 
 Push не прошёл. Что проверить:
   • 403 / Authentication failed → токен неверный или без scope "repo";
     создайте новый: Settings → Developer settings → Tokens (classic) → repo.
-  • 404 Not Found → в URL опечатка либо у токена нет прав на этот репозиторий.
+  • 404 Not Found → опечатка в URL либо у токена нет доступа к репозиторию.
   • rejected (fetch first) → на GitHub появились новые коммиты, запустите скрипт снова.
-  • Repository not found с верным именем → репозиторий ещё не создан на GitHub.
+  • Repository not found при верном имени → репозиторий ещё не создан на GitHub.
 HINT
-  exit 1
+    exit 1
+  fi
+  rm -f "$err"
 fi
 
 # --------------------------------------------------------------------------
