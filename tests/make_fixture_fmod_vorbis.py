@@ -94,3 +94,48 @@ BUG_CASE = None
 
 def _inject_bug(root: Path) -> None:
     raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Упаковка произвольного Ogg-Vorbis в FSB5 (для сквозного теста с реальным файлом)
+# ---------------------------------------------------------------------------
+
+FREQ_CODES = {8000: 1, 11000: 2, 11025: 3, 16000: 4, 22050: 5, 24000: 6,
+              32000: 7, 44100: 8, 48000: 9}
+
+
+def pack_ogg_into_fsb(ogg_bytes: bytes, *, samples: int) -> bytes:
+    """Собрать FSB5 v1 из готового Ogg-Vorbis.
+
+    FSB5 хранит тождественную идентификацию, setup в чанке VORBISDATA
+    (0xC4C30A29 + uint32 размер + setup) и аудиопакеты [uint16 len][packet].
+    Comment в банке не хранится — при обратной сборке он синтезируется.
+    """
+    from salvage.core import ogg as oggmod
+
+    pages = oggmod.parse_pages(ogg_bytes)
+    packets = [pkt for page in pages for pkt in page.packets]
+    if len(packets) < 4:
+        raise ValueError("в Ogg меньше трёх заголовков + аудио")
+    ident, setup = packets[0], packets[2]
+    audio = packets[3:]
+    channels = ident[11]
+    rate = struct.unpack_from("<I", ident, 12)[0]
+    code = FREQ_CODES.get(rate)
+    if code is None:
+        raise ValueError(f"частота {rate} не кодируется в FSB5")
+
+    payload = b"".join(struct.pack("<H", len(p)) + p for p in audio) + b"\x00\x00"
+    setup_chunk = struct.pack("<I", 0xC4C30A29) + struct.pack("<I", 0) + setup
+    # extra-чанк: тип 11 в битах 25.., размер — в битах 1..
+    extra = struct.pack("<I", (11 << 25) | (len(setup_chunk) << 1)) + setup_chunk
+    mode = (samples << 34) | (code << 1) | ((channels - 1) << 5) | 1
+    sample_hdr = struct.pack("<Q", mode) + extra
+    name = b"tone\x00"
+    name_table = struct.pack("<I", 4) + name
+    hdr = (b"FSB5" + struct.pack("<iiiii", 1, 1, len(sample_hdr), len(name_table),
+                                 len(payload))
+           + struct.pack("<II", 15, 0))          # кодек Vorbis
+    hdr += b"\x00" * (0x3C - len(hdr))
+    assert len(hdr) == 0x3C, len(hdr)
+    return hdr + sample_hdr + name_table + payload

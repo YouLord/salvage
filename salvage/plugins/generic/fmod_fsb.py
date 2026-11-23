@@ -228,30 +228,25 @@ def _ident_header(channels: int, frequency: int, blocksize: int) -> bytes:
                        frequency & 0xFFFFFFFF, 0, 0, 0, blocksize, 1)
 
 
+class FsbVorbisError(ValueError):
+    """VORBISDATA не соответствует ожидаемой структуре — конвертировать нельзя."""
+
+
 def vorbis_headers(sample: FsbSample,
                    blocksize: int = DEFAULT_BLOCKSIZE) -> tuple[bytes, bytes, bytes] | None:
-    """Три Vorbis-заголовка из FSB5: identification, comment, setup.
+    """Три Vorbis-заголовка для FSB5-Vorbis: идентификация, комментарий, setup.
 
-    FSB5 хранит только аудиопакеты; identification/setup лежат в чанке
-    VORBISDATA (setup — после 8-байтного заголовка id+size). Comment
-    восстанавливаем пустой — это стандартный и допустимый вариант.
+    Структура VORBISDATA строгая: uint32 id == 0xC4C30A29, uint32 размер setup,
+    затем сам setup-пакет («\x05vorbis»). Если хотя бы одно условие не сходится,
+    поднимаем FsbVorbisError — вызывающий код обязан отдать честный статус,
+    а не «сырой контейнер под видом .ogg».
     """
-    setup_blob = sample.vorbis_setup
-    if not setup_blob:
-        return None
-    if len(setup_blob) < 4:
-        return None
-    # setup_blob = [uint32 packet len?] + packet — в большинстве FSB5 длина уже отрезана
-    setup = setup_blob
-    if setup[:1] != b"\x05":
-        if setup_blob[:1] == b"\x05":
-            setup = setup_blob
-        else:
-            # некоторые паковщики оставляют 4-байтный префикс длины
-            cand = setup_blob[4:] if setup_blob[4:5] == b"\x05" else setup_blob
-            setup = cand
-    if setup[:1] != b"\x05":
-        return None
+    setup = sample.vorbis_setup
+    if not setup:
+        raise FsbVorbisError("нет чанка VORBISDATA")
+    if setup[:1] != b"\x05" or setup[1:7] != b"vorbis":
+        raise FsbVorbisError(
+            f"setup не начинается с 0x05 'vorbis' (первые байты: {setup[:7]!r})")
     if (blocksize & 0xF) == 0 or (blocksize >> 4) == 0:
         blocksize = DEFAULT_BLOCKSIZE
     ident = _ident_header(sample.channels, sample.frequency, blocksize)
@@ -269,8 +264,6 @@ def build_ogg(sample: FsbSample, payload: bytes,
     отдать честный статус, а не «сырой» файл с расширением .ogg.
     """
     headers = vorbis_headers(sample, blocksize)
-    if headers is None:
-        return None
     ident, comment, setup = headers
     # аудиопакеты: FSB5 v1+ пишет 2-байтную длину перед каждым пакетом
     packets = _split_fsb_vorbis_packets(payload)
@@ -311,10 +304,11 @@ def build_ogg_verified(sample: FsbSample, payload: bytes) -> dict:
     best: bytes | None = None
     chosen = DEFAULT_BLOCKSIZE
     for bs in BLOCKSIZE_CANDIDATES:
-        data = build_ogg(sample, payload, blocksize=bs)
-        if data is None:
+        try:
+            data = build_ogg(sample, payload, blocksize=bs)
+        except FsbVorbisError as exc:
             return {"data": None, "blocksize": None, "verified": False,
-                    "status": "headers-unrecoverable"}
+                    "status": "headers-unrecoverable", "reason": str(exc)}
         if best is None:
             best, chosen = data, bs
         if sf is None:

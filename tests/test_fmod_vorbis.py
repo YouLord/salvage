@@ -95,5 +95,29 @@ class TestOggPrimitives(unittest.TestCase):
             ogg.verify_stream(b"OggS\x00salvage-fsb5-raw\x00not really an ogg")
 
 
+class TestVorbisDataStrictness(unittest.TestCase):
+    """Битая VORBISDATA — честная ошибка, а не «сырой контейнер как .ogg»."""
+
+    def _sample(self, setup: bytes):
+        from salvage.plugins.generic.fmod_fsb import FsbSample
+        return FsbSample(index=0, name="x", codec=15, channels=1, frequency=22050,
+                         samples=1000, data_offset=0, data_size=0,
+                         vorbis_setup=setup)
+
+    def test_missing_chunk(self) -> None:
+        from salvage.plugins.generic import fmod_fsb
+        res = fmod_fsb.build_ogg_verified(self._sample(b""), b"")
+        self.assertIsNone(res["data"])
+        self.assertEqual(res["status"], "headers-unrecoverable")
+        self.assertIn("VORBISDATA", res.get("reason", ""))
+
+    def test_wrong_magic_in_setup(self) -> None:
+        from salvage.plugins.generic import fmod_fsb
+        res = fmod_fsb.build_ogg_verified(self._sample(b"\x09vorbisgarbage"), b"x")
+        self.assertIsNone(res["data"])
+        self.assertEqual(res["status"], "headers-unrecoverable")
+        self.assertIn("0x05", res.get("reason", ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

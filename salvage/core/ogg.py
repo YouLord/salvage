@@ -74,8 +74,9 @@ def build_page(packets: list[bytes], *, serial: int, sequence: int, granule: int
     if len(lacing) > 255:
         raise ValueError("слишком много сегментов на страницу (максимум 255)")
     body = b"".join(packets)
-    header = struct.pack("<4sBBqIIIB", OGG_MAGIC, 0, header_type, granule,
-                         serial, sequence, 0, len(lacing)) + lacing
+    header = struct.pack("<4sBBQIIIB", OGG_MAGIC, 0, header_type,
+                         granule & 0xFFFFFFFFFFFFFFFF,
+                         serial & 0xFFFFFFFF, sequence, 0, len(lacing)) + lacing
     page = header + body
     crc = ogg_crc(page)
     # перезаписываем crc (смещение 22)
@@ -84,45 +85,38 @@ def build_page(packets: list[bytes], *, serial: int, sequence: int, granule: int
 
 def build_stream(packets: list[bytes], *, serial: int, granules: list[int],
                  page_packets: int = 0) -> bytes:
-    """Собрать поток из пакетов.
+    """Собрать Ogg-поток из трёх Vorbis-заголовков и аудиопакетов.
 
-    packets[0..2] — три Vorbis-заголовка (идентификация, комментарий, setup).
-    Остальные — аудиопакеты.
+    packets[0..2] — идентификация, комментарий, setup; дальше — аудио.
+    page_packets — сколько аудиопакетов класть на страницу (0 — все в одну).
 
-    granules:
-      * если задан явный список — по одному значению на каждую аудиостраницу
-        (для Wwise: granule из заголовков пакетов, включая возможные 0);
-      * если задан `page_packets=0` (все аудиопакеты в одну страницу) —
-        достаточно одного элемента: granule последней страницы;
-      * иначе granule нарастает на granule_step сэмплов на страницу.
+    granule: промежуточные страницы получают -1 (0xFFFF...), это легально
+    по спецификации Ogg; итоговый granule (суммарные сэмплы) выставляется
+    только на последней странице. Прямое следствие: точный seek по времени
+    приблизительный — плеер ищет по страницам, а не по сэмплам.
     """
     if len(packets) < 3:
         raise ValueError("нужно минимум 3 заголовочных пакета Vorbis")
     out = bytearray()
     serial &= 0xFFFFFFFF
-    # страница 1: идентификация (BOS)
     out += build_page([packets[0]], serial=serial, sequence=0, granule=0, header_type=0x02)
-    # страница 2: комментарий + setup (все три заголовка закончились здесь)
     out += build_page([packets[1], packets[2]], serial=serial, sequence=1,
                       granule=0, header_type=0)
     seq = 2
     audio = packets[3:]
+    final_granule = granules[-1] if granules else 0
     if not audio:
-        # пустой поток: только EOS-страница с granule 0
         out += build_page([b""], serial=serial, sequence=seq,
-                          granule=granules[-1] if granules else 0, header_type=0x04)
+                          granule=final_granule, header_type=0x04)
         return bytes(out)
     step = page_packets if page_packets > 0 else len(audio)
-    idx = 0
     for start in range(0, len(audio), step):
         chunk = audio[start:start + step]
-        gi = min(idx, len(granules) - 1) if granules else 0
         last = start + step >= len(audio)
         out += build_page(chunk, serial=serial, sequence=seq,
-                          granule=granules[gi] if granules else 0,
+                          granule=final_granule if last else -1,
                           header_type=0x04 if last else 0)
         seq += 1
-        idx += 1
     return bytes(out)
 
 
@@ -190,9 +184,19 @@ def verify_stream(data: bytes) -> dict:
     head = pages[0].segments[0] if pages[0].segments else b""
     if not (head[:1] == b"\x01" and head[1:7] == b"vorbis"):
         raise OggError("нет идентификационного заголовка Vorbis")
+    # granule промежуточных страниц обязан быть -1 (или монотонно расти);
+    # последняя — итоговая сумма сэмплов, и она не меньше всех предыдущих.
+    seen: list[int] = []
+    for i, p in enumerate(pages):
+        if p.granule == -1:
+            continue
+        if seen and p.granule < seen[-1]:
+            raise OggError(f"granule убывает на странице {i}: {p.granule} < {seen[-1]}")
+        seen.append(p.granule)
     return {
         "pages": len(pages),
         "serial": serial,
         "granule": pages[-1].granule,
         "headers": sum(1 for p in pages[:2] for _ in p.segments),
+        "granules": [p.granule for p in pages],
     }
