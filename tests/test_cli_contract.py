@@ -191,10 +191,13 @@ class TestReportSchema(CliBase):
         doc = json.loads((out / "scan.json").read_text("utf-8"))
         doctor = doc["meta"]["doctor"]
         total = sum(item["penalty"] for item in doctor["score_breakdown"])
-        self.assertEqual(doctor["score"], max(0, 100 + total))
+        self.assertEqual(doctor["score"], max(0, 100 - total),
+                         "score обязан сходиться с суммой штрафов")
         for item in doctor["score_breakdown"]:
-            for key in ("rule", "title", "cases", "weight", "cap", "penalty"):
+            for key in ("code", "reason", "count", "weight", "cap", "penalty"):
                 self.assertIn(key, item)
+            self.assertLessEqual(item["penalty"], item["cap"], "штраф не больше потолка")
+            self.assertGreaterEqual(item["penalty"], 0, "штраф — положительное число")
         self.assertIn("Из чего сложилась оценка",
                       (out / "report.md").read_text("utf-8"))
 

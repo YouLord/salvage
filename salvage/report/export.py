@@ -84,11 +84,14 @@ def render_markdown(ds: Dataset) -> str:
             a("")
             a("Из чего сложилась оценка:")
             a("")
-            a("| правило | случаев | вес | списано |")
-            a("|---|---:|---:|---:|")
+            a("| правило | код | случаев | вес | списано |")
+            a("|---|---|---:|---:|---:|")
             for item in breakdown:
-                a(f"| {item['title']} | {item['cases']} | {item['weight']} "
-                  f"| {item['penalty']} |")
+                if not item["penalty"]:
+                    continue
+                a(f"| {item['reason']} | `{item['code']}` | {item['count']} "
+                  f"| {item['weight']} | −{item['penalty']} |")
+            a(f"| **итого** | | | | **−{sum(i['penalty'] for i in breakdown)}** |")
         a("")
     if ds.extraction:
         a("## Извлечение")

@@ -137,14 +137,14 @@ def run_doctor(ds: Dataset) -> dict:
     # PNG с нулевыми размерами — тоже битые (просто заголовок валиден)
     zero_dim_pngs = [p for p in pngs if p["width"] == 0 or p["height"] == 0]
 
-    # Каждое слагаемое: сколько случаев, вес, потолок, что именно списано.
+    # Каждое слагаемое: код, человеческая причина, сколько случаев, потолок,
+    # и сколько именно списано (штраф ПОЛОЖИТЕЛЬНЫЙ: score = 100 - Σ penalty).
     breakdown: list[dict] = []
 
-    def dock(rule: str, title: str, cases: int, weight: int, cap: int) -> None:
-        raw = cases * weight
-        delta = -min(cap, raw)
-        breakdown.append({"rule": rule, "title": title, "cases": cases,
-                          "weight": weight, "cap": cap, "penalty": delta})
+    def dock(code: str, reason: str, count: int, weight: int, cap: int) -> None:
+        penalty = min(cap, count * weight)
+        breakdown.append({"code": code, "reason": reason, "count": count,
+                          "weight": weight, "cap": cap, "penalty": penalty})
 
     dock("bad_image", "битые изображения", media["counts"]["bad_images"]
          + len(zero_dim_pngs), 2, 30)
@@ -155,7 +155,7 @@ def run_doctor(ds: Dataset) -> dict:
     dock("error_findings", "находки-ошибки", len(by["error"]), 2, 10)
     dock("warn_findings", "находки-предупреждения", len(by["warn"]), 1, 10)
 
-    score = max(0, 100 + sum(item["penalty"] for item in breakdown))
+    score = max(0, 100 - sum(item["penalty"] for item in breakdown))
 
     # если скан упёрся в лимиты — «отлично» было бы враньём
     truncated = bool(ds.meta.get("truncated"))
@@ -205,11 +205,15 @@ def doctor_markdown(report: dict) -> str:
     if breakdown:
         lines.append("## Из чего сложилась оценка")
         lines.append("")
-        lines.append("| правило | случаев | вес | списано |")
-        lines.append("|---|---:|---:|---:|")
+        lines.append("| правило | код | случаев | вес | списано |")
+        lines.append("|---|---|---:|---:|---:|")
         for item in breakdown:
-            lines.append(f"| {item['title']} | {item['cases']} | {item['weight']} "
-                         f"| {item['penalty']} |")
+            if not item["penalty"]:
+                continue
+            lines.append(f"| {item['reason']} | `{item['code']}` | {item['count']} "
+                         f"| {item['weight']} | −{item['penalty']} |")
+        total = sum(item["penalty"] for item in breakdown)
+        lines.append(f"| **итого** | | | | **−{total}** |")
         lines.append("")
     if m["bad_images"]:
         lines.append("## Битые изображения")
