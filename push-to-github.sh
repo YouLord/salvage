@@ -117,16 +117,22 @@ if remote_files="$(git ls-remote --heads "$REPO_URL" "$BRANCH" 2>/dev/null)" && 
   fi
   mapfile -t theirs < <(cd "$work_remote/remote" && git ls-files)
   echo "  файлов на GitHub: ${#theirs[@]}"
-  # безобидные файлы, которые GitHub создаёт сам при инициализации репозитория
-  harmless=0
+  # «Чужие» — это файлы, которых у нас НЕТ. Одинаковые имена — не повод
+  # отказывать: после успешной заливки на GitHub лежит ровно наш набор, и
+  # повторный запуск должен быть спокойным no-op, а не «форсить нельзя».
+  mapfile -t ours < <(git ls-files)
+  declare -A ours_set=()
+  for f in "${ours[@]:-}"; do [ -n "$f" ] && ours_set["$f"]=1; done
   foreign=()
   for f in "${theirs[@]:-}"; do
     [ -z "$f" ] && continue
-    case "$f" in
-      README.md|LICENSE|LICENSE.md|LICENSE.txt|.gitignore|.gitattributes|CODE_OF_CONDUCT.md|CONTRIBUTING.md)
-        harmless=$((harmless+1)) ;;
-      *) foreign+=("$f") ;;
-    esac
+    if [ -z "${ours_set[$f]:-}" ]; then
+      case "$f" in
+        README.md|LICENSE|LICENSE.md|LICENSE.txt|.gitignore|.gitattributes|CODE_OF_CONDUCT.md|CONTRIBUTING.md)
+          : ;;   # безобидные автогенераты GitHub — не считаем чужими
+        *) foreign+=("$f") ;;
+      esac
+    fi
   done
   if [ "${#foreign[@]}" -gt 0 ]; then
     warn "на GitHub есть файлы, которых нет у нас:"
@@ -138,6 +144,15 @@ if remote_files="$(git ls-remote --heads "$REPO_URL" "$BRANCH" 2>/dev/null)" && 
      # либо, если это точно ваш черновик и его можно потерять:
      #   git push --force-with-lease origin $BRANCH"
   fi
+  if [ "$(git rev-parse HEAD)" = "$(git --git-dir="$work_remote/remote/.git" rev-parse HEAD)" ]; then
+    echo "  на GitHub уже ровно наш HEAD — сливать нечего"
+    remote_up_to_date=1
+  else
+    remote_up_to_date=0
+  fi
+  if [ "${remote_up_to_date:-0}" = "1" ]; then
+    say "  содержимое совпадает — merge не нужен"
+  else
   # У GitHub «Initial commit» не связан с нашей историей → --allow-unrelated-histories.
   # -X ours: конфликтующие файлы (типичный случай — README.md, который GitHub
   # создал сам) остаются НАШИМИ, а посторонний Initial commit сохраняется в истории.
@@ -151,6 +166,7 @@ if remote_files="$(git ls-remote --heads "$REPO_URL" "$BRANCH" 2>/dev/null)" && 
     die "слияние не удалось. Разрешите вручную:
      git status ; поправьте файл ; git add -A ; git commit
      затем снова запустите этот скрипт."
+  fi
   fi
   # наш README должен остаться нашим (GitHub писал в него заголовок репозитория)
   if [ -f README.md ] && ! grep -q '^# salvage' README.md; then
