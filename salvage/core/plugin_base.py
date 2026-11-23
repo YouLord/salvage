@@ -29,7 +29,7 @@ class EngineContext:
     hash_limit_mb: int = 256             # не хэшировать файлы больше N МБ
     max_asset_bytes: int = 16 << 20      # лимит распаковки одного файла из контейнера
     max_files: int = 200_000             # сколько файлов вообще просматриваем
-    max_containers: int = 300            # сколько контейнеров читаем вглубь
+    max_container_files: int = 300       # сколько контейнеров читаем вглубь
     exclude: list[Path] = field(default_factory=list)
     out_dir: Path | None = None
     keys: dict[str, str] = field(default_factory=dict)   # подсказки ключей (напр. rpgmaker)

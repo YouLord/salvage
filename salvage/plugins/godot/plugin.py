@@ -9,7 +9,7 @@ from ...core.model import Dataset
 from ...core.plugin_base import EngineContext, EnginePlugin
 from ...core.util import (classify, head_bytes, human_int, iter_files, rel_posix,
                           safe_rel, sha256_file, sniff_magic, ext_of)
-from .._shared import copy_verbatim, merge_summaries
+from .._shared import copy_verbatim, merge_summaries, write_atomic
 
 GD_EXT = {".tscn", ".tres", ".gd", ".gdc", ".godot", ".import", ".remap",
           ".gde", ".escn", ".scn", ".res", ".pck", ".so", ".dll"}
@@ -241,6 +241,7 @@ class GodotPlugin(EnginePlugin):
 
     def _extract_pck_entries(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                              only_kinds: set[str] | None) -> dict:
+        overwritten = 0
         out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
         root = dataset.root
         by_container: dict[str, list] = {}
@@ -267,7 +268,7 @@ class GodotPlugin(EnginePlugin):
                         data = f.read(min(a.size, ctx.max_asset_bytes))
                         target = dest / stem / safe_rel(a.path)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(data)
+                        overwritten += write_atomic(target, data)
                         out["extracted"] += 1
                         if len(out["samples"]) < 10:
                             out["samples"].append(a.path)

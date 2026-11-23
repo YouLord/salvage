@@ -90,6 +90,13 @@ def render_html(ds: Dataset) -> str:
     p(f"<span class='chip w'><b>{warns}</b> предупреждений</span>")
     p(f"<span class='chip'><b>{infos}</b> инфо · <b>{oks}</b> ок</span>")
     p(f"<span class='chip'>движок: <b>{_esc(ds.engine_slug)}</b> @ {ds.score:.2f}</span>")
+    if ds.meta.get("truncated"):
+        limits = ds.meta.get("limits") or {}
+        hit = ", ".join(f"{_esc(k)} (лимит {v.get('limit')})"
+                        for k, v in limits.items() if v.get("hit"))
+        p(f"<div class='banner-warn' style='border:1px solid var(--warn);padding:8px;"
+          f"margin:10px 0;font-weight:600'>СКАН НЕПОЛНЫЙ: сработали лимиты — "
+          f"{hit or 'meta.limits'}. Не читайте отчёт как полный инвентарь.</div>")
     p(f"<span class='chip'>сгенерировано: <b>{datetime.now().strftime('%Y-%m-%d %H:%M')}</b></span>")
     p("</div></header>")
 

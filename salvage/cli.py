@@ -34,7 +34,6 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("path", help="каталог игры или проекта")
         sp.add_argument("--engine", default=None,
-                        choices=sorted(build_registry()),
                         metavar="ENGINE",
                         help="форсировать движок: " + ", ".join(sorted(build_registry()))
                              + " (без флага — автодетект, generic — запасной)")
@@ -93,6 +92,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Неизвестный движок — это не «аргумент не тот» (argparse дал бы 2),
+    # а невозможность выполнить работу: код 3, как у прочих отказов.
+    engine = getattr(args, "engine", None)
+    if engine is not None:
+        known = build_registry()
+        if engine not in known:
+            print(f"salvage: неизвестный движок {engine!r}; доступны: "
+                  f"{', '.join(sorted(known))}", file=sys.stderr)
+            return 3
     try:
         if args.cmd == "engines":
             return _cmd_engines()
@@ -194,13 +202,22 @@ def _cmd_extract(args) -> int:
     dest.mkdir(parents=True, exist_ok=True)
     summary = plugin.extract(ds, dest, ctx, kinds)
     ds.extracted_count = summary.get("extracted", 0)
+    statuses = dict(summary.get("statuses") or {})
+    skipped = int(summary.get("skipped", 0))
+    errors = int(summary.get("errors", 0))
     ds.extraction = {k: v for k, v in summary.items() if k != "samples"}
+    ds.extraction["statuses"] = statuses
+    ds.extraction["partial"] = bool(skipped or errors)
+    ds.extraction["overwritten"] = int(summary.get("overwritten", 0))
     print()
     print(f"Извлечение в {dest}:")
-    print(f"  файлов: {summary.get('extracted', 0)}  пропущено: {summary.get('skipped', 0)}"
-          f"  ошибок: {summary.get('errors', 0)}")
+    print(f"  файлов: {summary.get('extracted', 0)}  пропущено: {skipped}"
+          f"  ошибок: {errors}  перезаписано: {ds.extraction['overwritten']}")
     if summary.get("message"):
         print(f"  {summary['message']}")
+    if statuses:
+        detail = ", ".join(f"{k}×{v}" for k, v in sorted(statuses.items()))
+        print(f"  статусы: {detail}")
     for s in (summary.get("samples") or [])[:10]:
         print(f"    · {s}")
     if args.report:
@@ -208,7 +225,22 @@ def _cmd_extract(args) -> int:
         write_html(ds, out / "report.html")
         write_json(ds, out / "scan.json")
         print(f"  отчёт: {out / 'report.html'}")
-    return _exit_code(ds)
+
+    # политика кодов возврата для extract:
+    #   0 — всё извлечено без пропусков;
+    #   1 — частично: что-то пропущено из-за защиты/неподдерживаемого сжатия;
+    #   2 — были ошибки (в т.ч. находки-ошибки скана); 3 — прервано (см. main).
+    if skipped:
+        ds.add_finding(
+            "warn", "extract_partial",
+            f"Извлечение частичное: пропущено {skipped}",
+            "Пропуски из-за шифрования/неподдерживаемого сжатия перечислены в "
+            f"extraction.statuses: {', '.join(sorted(statuses)) or 'без деталей'}.")
+    if errors:
+        return 2
+    if skipped or ds.findings_by_severity()["warn"]:
+        return 1
+    return 0
 
 
 def _exit_code(ds) -> int:

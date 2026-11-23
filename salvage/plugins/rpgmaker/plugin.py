@@ -15,7 +15,7 @@ from pathlib import Path
 from ...core.model import Dataset
 from ...core.plugin_base import EngineContext, EnginePlugin
 from ...core.util import classify, head_bytes, human_int, iter_files, rel_posix, safe_rel, sha256_file, sniff_magic
-from .._shared import copy_verbatim
+from .._shared import copy_verbatim, write_atomic
 
 MV_FAKE = b"RPGMV"
 MZ_FAKE = b"RPGMZ"
@@ -253,6 +253,7 @@ class RPGMakerPlugin(EnginePlugin):
     # ------------------------------------------------------------------
     def extract(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                 only_kinds: set[str] | None = None) -> dict:
+        overwritten = 0
         base = copy_verbatim(dataset, dest, ctx, only_kinds)
         key = self._resolve_key(dataset, ctx)
         dec_dir = Path(dest) / "decrypted"
@@ -285,7 +286,7 @@ class RPGMakerPlugin(EnginePlugin):
                 tgt_name = dec_name(a.path)
                 target = dec_dir / safe_rel(str(stem.parent / tgt_name))
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(dec)
+                overwritten += write_atomic(target, dec)
                 out["extracted"] += 1
                 if len(out["samples"]) < 10:
                     out["samples"].append(str(target.relative_to(dec_dir)))
@@ -316,6 +317,7 @@ class RPGMakerPlugin(EnginePlugin):
     # ------------------------------------------------------------------
     def _extract_rgss(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                       only_kinds: set[str] | None) -> dict:
+        overwritten = 0
         out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
         for a in dataset.assets:
             if a.container is None or "rgss_version" not in a.extra:
@@ -332,7 +334,7 @@ class RPGMakerPlugin(EnginePlugin):
                     continue
                 target = Path(dest) / "rgss" / Path(a.container).stem / safe_rel(a.path)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data[: ctx.max_asset_bytes])
+                overwritten += write_atomic(target, data[: ctx.max_asset_bytes])
                 out["extracted"] += 1
                 if len(out["samples"]) < 10:
                     out["samples"].append(str(target.relative_to(Path(dest))))

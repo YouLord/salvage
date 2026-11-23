@@ -22,7 +22,7 @@ from ...core import imaging
 from ...core.model import Dataset
 from ...core.plugin_base import EngineContext, EnginePlugin
 from ...core.util import classify, head_bytes, human_int, iter_files, rel_posix, safe_rel, sha256_file, sniff_magic
-from .._shared import copy_verbatim
+from .._shared import copy_verbatim, write_atomic
 
 GM_DATA_NAMES = {"data.win", "game.win", "data.unx", "data.ios", "data.droid",
                  "game.unx", "game.ios", "game.droid", "data.android", "game.desktop",
@@ -571,6 +571,7 @@ class GameMakerPlugin(EnginePlugin):
     # ------------------------------------------------------------------
     def extract(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                 only_kinds: set[str] | None = None) -> dict:
+        overwritten = 0
         base = copy_verbatim(dataset, dest, ctx, only_kinds)
         gm = dataset.meta.get("gamemaker") or {}
         manifest = gm.get("manifest")
@@ -583,9 +584,10 @@ class GameMakerPlugin(EnginePlugin):
         manifest_out["extraction"] = {"texture_format": texture_format, "files": []}
 
         def add_file(rel_path: str, data: bytes) -> None:
+            overwritten = 0
             target = dest / safe_rel(rel_path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            overwritten += write_atomic(target, data)
             out["extracted"] += 1
             manifest_out["extraction"]["files"].append(rel_path)
             if len(out["samples"]) < 12:

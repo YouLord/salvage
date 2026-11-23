@@ -16,7 +16,7 @@ from ...core.model import Dataset
 from ...core.plugin_base import EngineContext, EnginePlugin, note_limit
 from ...core.util import (classify, head_bytes, human_bytes, human_int, iter_files,
                           rel_posix, safe_rel, sha256_file, sniff_magic)
-from .._shared import copy_verbatim
+from .._shared import copy_verbatim, write_atomic
 from ...core import wwise
 from . import fmod_fsb, unreal_pak
 
@@ -251,22 +251,28 @@ class GenericPlugin(EnginePlugin):
     def extract(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                 only_kinds: set[str] | None = None) -> dict:
         summary = copy_verbatim(dataset, dest, ctx, only_kinds)
+        # статусы всех ступеней: причина пропуска должна быть видна, а не «skipped»
+        statuses: dict[str, int] = dict(summary.get("statuses") or {})
         summary["extracted"] = summary.get("extracted", 0)
         extra_msgs: list[str] = []
 
         # --- Unreal pak ---
         if only_kinds is None or "archive" in only_kinds or "data" in only_kinds:
             pak_stats = self._extract_paks(dataset, Path(dest), ctx, only_kinds)
+            summary["overwritten"] = summary.get("overwritten", 0) + pak_stats.get("overwritten", 0)
             summary["extracted"] += pak_stats["extracted"]
             summary["skipped"] += pak_stats["skipped"]
             summary["errors"] += pak_stats["errors"]
             summary["samples"] = (summary["samples"] + pak_stats["samples"])[:20]
+            for k, v in (dataset.meta.get("ue_pak_statuses") or {}).items():
+                statuses[k] = statuses.get(k, 0) + v
             if pak_stats["message"]:
                 extra_msgs.append(pak_stats["message"])
 
         # --- FMOD ---
         if only_kinds is None or "audio" in only_kinds:
             bank_stats = self._extract_banks(dataset, Path(dest), ctx)
+            summary["overwritten"] = summary.get("overwritten", 0) + bank_stats.get("overwritten", 0)
             summary["extracted"] += bank_stats["extracted"]
             summary["errors"] += bank_stats["errors"]
             summary["samples"] = (summary["samples"] + bank_stats["samples"])[:20]
@@ -276,15 +282,19 @@ class GenericPlugin(EnginePlugin):
         # --- Wwise ---
         if only_kinds is None or "audio" in only_kinds:
             wwise_stats = self._extract_wwise(dataset, Path(dest), ctx)
+            summary["overwritten"] = summary.get("overwritten", 0) + wwise_stats.get("overwritten", 0)
             summary["extracted"] += wwise_stats["extracted"]
             summary["skipped"] += wwise_stats["skipped"]
             summary["errors"] += wwise_stats["errors"]
             summary["samples"] = (summary["samples"] + wwise_stats["samples"])[:20]
+            for k, v in (dataset.meta.get("wwise_wem_status") or {}).items():
+                statuses[k] = statuses.get(k, 0) + v
             if wwise_stats["message"]:
                 extra_msgs.append(wwise_stats["message"])
 
         # --- zip ---
         zip_stats = self._extract_zips(dataset, Path(dest), ctx)
+        summary["overwritten"] = summary.get("overwritten", 0) + zip_stats.get("overwritten", 0)
         summary["extracted"] += zip_stats["extracted"]
         summary["errors"] += zip_stats["errors"]
         if zip_stats["message"]:
@@ -292,12 +302,15 @@ class GenericPlugin(EnginePlugin):
 
         if extra_msgs:
             summary["message"] = (summary.get("message", "") + " " + " ".join(extra_msgs)).strip()
+        summary["statuses"] = statuses
         return summary
 
     # ------------------------------------------------------------------
     def _extract_paks(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                       only_kinds: set[str] | None) -> dict:
-        out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
+        overwritten = 0
+        out = {"extracted": 0, "skipped": 0, "errors": 0, "overwritten": 0,
+               "samples": [], "message": ""}
         statuses: dict[str, int] = {}
         paks: dict[str, object] = dataset.meta.get("ue_pak_objects") or {}
         for rel, pak in paks.items():
@@ -317,7 +330,7 @@ class GenericPlugin(EnginePlugin):
                 statuses[status] = statuses.get(status, 0) + 1
                 target = dest / "pak" / Path(rel).stem / safe_rel(e.name)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
+                overwritten += write_atomic(target, data)
                 out["extracted"] += 1
                 if len(out["samples"]) < 10:
                     out["samples"].append(f"{rel}:{e.name}")
@@ -326,10 +339,12 @@ class GenericPlugin(EnginePlugin):
             out["message"] = (f"UE .pak: извлечено {out['extracted']}, "
                               f"пропущено {out['skipped']} ({detail}).")
             dataset.meta["ue_pak_statuses"] = statuses
+        out["overwritten"] = overwritten
         return out
 
     def _extract_banks(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
-        out = {"extracted": 0, "errors": 0, "samples": [], "message": ""}
+        overwritten = 0
+        out = {"extracted": 0, "errors": 0, "overwritten": 0, "samples": [], "message": ""}
         for a in dataset.assets:
             if "fsb_index" not in a.extra or not a.container:
                 continue
@@ -349,7 +364,7 @@ class GenericPlugin(EnginePlugin):
                     if ogg:
                         target = target.with_suffix(".ogg.raw")
                         payload = ogg
-                target.write_bytes(payload[: ctx.max_asset_bytes])
+                overwritten += write_atomic(target, payload[: ctx.max_asset_bytes])
                 out["extracted"] += 1
                 if len(out["samples"]) < 10:
                     out["samples"].append(str(target.relative_to(dest)))
@@ -359,10 +374,13 @@ class GenericPlugin(EnginePlugin):
                     out["samples"].append(f"! {a.path}: {exc}")
         if out["extracted"]:
             out["message"] = f"FMOD: извлечено сэмплов {out['extracted']}."
+        out["overwritten"] = overwritten
         return out
 
     def _extract_wwise(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
-        out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
+        overwritten = 0
+        out = {"extracted": 0, "skipped": 0, "errors": 0, "overwritten": 0,
+               "samples": [], "message": ""}
         statuses: dict[str, int] = {}
         for a in dataset.assets:
             if "wwise_id" not in a.extra or not a.container:
@@ -381,7 +399,7 @@ class GenericPlugin(EnginePlugin):
             ext = wwise.wem_extension(payload)
             target = dest / "wwise" / Path(a.container).stem / f"wem_{entry.wem_id}.{ext}"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload[: ctx.max_asset_bytes])
+            overwritten += write_atomic(target, payload[: ctx.max_asset_bytes])
             out["extracted"] += 1
             if len(out["samples"]) < 10:
                 out["samples"].append(f"{target.relative_to(dest)} ({status})")
@@ -389,10 +407,12 @@ class GenericPlugin(EnginePlugin):
             detail = ", ".join(f"{k}×{v}" for k, v in sorted(statuses.items()))
             out["message"] = f"Wwise: .wem {out['extracted']} ({detail})."
             dataset.meta["wwise_wem_status"] = statuses
+        out["overwritten"] = overwritten
         return out
 
     def _extract_zips(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
-        out = {"extracted": 0, "errors": 0, "samples": [], "message": ""}
+        overwritten = 0
+        out = {"extracted": 0, "errors": 0, "overwritten": 0, "samples": [], "message": ""}
         for a in dataset.assets:
             if a.kind != "archive" or a.container:
                 continue
@@ -411,7 +431,7 @@ class GenericPlugin(EnginePlugin):
                         dest_file = target / name
                         dest_file.parent.mkdir(parents=True, exist_ok=True)
                         with zf.open(info) as src, open(dest_file, "wb") as dst:
-                            dst.write(src.read(ctx.max_asset_bytes))
+                            overwritten += int(write_atomic(dst, src.read(ctx.max_asset_bytes)))
                         out["extracted"] += 1
                         if len(out["samples"]) < 10:
                             out["samples"].append(f"{a.path}:{info.filename}")
@@ -419,4 +439,5 @@ class GenericPlugin(EnginePlugin):
                 out["errors"] += 1
         if out["extracted"]:
             out["message"] = f"Распаковано из zip: {out['extracted']} файлов."
+        out["overwritten"] = overwritten
         return out

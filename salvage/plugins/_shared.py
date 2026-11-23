@@ -9,11 +9,31 @@ from ..core.plugin_base import EngineContext
 from ..core.util import human_bytes, safe_rel
 
 
+def write_atomic(target: Path, data: bytes) -> bool:
+    """Атомарно записать файл: tmp в том же каталоге + os.replace.
+
+    Возвращает True, если файл уже существовал (перезапись). Так повторный
+    extract в тот же --out не оставляет половину файла при сбое.
+    """
+    import os
+
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    tmp = target.with_name(target.name + ".salvage-tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+    return existed
+
+
 def copy_verbatim(ds: Dataset, dest: Path, ctx: EngineContext,
                   only_kinds: set[str] | None = None, subdir: str = "files",
                   skip_kinds: set[str] | None = None) -> dict:
     """Побайтовое копирование учтённых файлов (базовый уровень извлечения)."""
-    extracted = skipped = errors = 0
+    extracted = skipped = errors = overwritten = 0
     samples: list[str] = []
     dest = Path(dest)
     root = ds.root
@@ -33,6 +53,8 @@ def copy_verbatim(ds: Dataset, dest: Path, ctx: EngineContext,
         target = dest / subdir / safe_rel(a.path)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                overwritten += 1
             shutil.copy2(src, target)
             extracted += 1
             if len(samples) < 12:
@@ -43,6 +65,7 @@ def copy_verbatim(ds: Dataset, dest: Path, ctx: EngineContext,
                 samples.append(f"! {a.path}: {exc}")
     return {
         "extracted": extracted, "skipped": skipped, "errors": errors,
+        "overwritten": overwritten,
         "bytes": ds.total_size, "samples": samples,
         "message": f"Скопировано {extracted} файлов ({human_bytes(ds.total_size)}).",
     }
@@ -53,6 +76,7 @@ def merge_summaries(a: dict, b: dict) -> dict:
         "extracted": a.get("extracted", 0) + b.get("extracted", 0),
         "skipped": a.get("skipped", 0) + b.get("skipped", 0),
         "errors": a.get("errors", 0) + b.get("errors", 0),
+        "overwritten": a.get("overwritten", 0) + b.get("overwritten", 0),
         "samples": (a.get("samples") or []) + (b.get("samples") or []),
         "message": "; ".join(m for m in (a.get("message"), b.get("message")) if m),
     }

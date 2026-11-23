@@ -15,7 +15,7 @@ from pathlib import Path
 from ...core.model import Dataset
 from ...core.plugin_base import EngineContext, EnginePlugin
 from ...core.util import classify, head_bytes, human_int, iter_files, rel_posix, safe_rel, sha256_file, sniff_magic
-from .._shared import copy_verbatim, merge_summaries
+from .._shared import copy_verbatim, merge_summaries, write_atomic
 
 RPA_HEADER_RX = re.compile(rb"RPA-(\d\.\d) ([0-9a-f]{8,16}) ([0-9a-f]{8,16})\n")
 
@@ -125,6 +125,7 @@ class RenPyPlugin(EnginePlugin):
     # ------------------------------------------------------------------
     def extract(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                 only_kinds: set[str] | None = None) -> dict:
+        overwritten = 0
         base = copy_verbatim(dataset, dest, ctx, only_kinds, skip_kinds={"archive"})
         out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
         by_container: dict[str, list] = {}
@@ -152,7 +153,7 @@ class RenPyPlugin(EnginePlugin):
                         data = f.read(min(length, ctx.max_asset_bytes))
                         target = Path(dest) / "rpa" / stem / safe_rel(a.path)
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(data)
+                        overwritten += write_atomic(target, data)
                         out["extracted"] += 1
                         if len(out["samples"]) < 10:
                             out["samples"].append(a.path)

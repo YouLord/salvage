@@ -39,6 +39,7 @@ def scan(root: Path, engine: str | None = None, ctx: EngineContext | None = None
     ctx = ctx or EngineContext()
 
     plugin, score, evidence = resolve_plugin(root, engine)
+    forced = bool(engine)
     ctx.say(f"Движок: {plugin.display_name} (уверенность {score:.2f})")
     for ev in evidence[:5]:
         ctx.say(f"  улика: {ev}")
@@ -46,6 +47,7 @@ def scan(root: Path, engine: str | None = None, ctx: EngineContext | None = None
     ds = plugin.scan(root, ctx)
     ds.score = score
     ds.meta.setdefault("detection_evidence", evidence)
+    ds.meta["detection_mode"] = "forced" if forced else "auto"
 
     # общий обход: добавляем файлы, которые плагин не учёл сам
     # (нужно и generic-режиму, и доктору: медиа на диске должны быть в индексе)

@@ -155,11 +155,11 @@ class UnityPlugin(EnginePlugin):
         failed = 0
         externals: set[str] = set()
         object_assets = 0
-        if len(candidates) > ctx.max_containers:
+        if len(candidates) > ctx.max_container_files:
             from ...core.plugin_base import note_limit
-            note_limit(ds, "containers", ctx.max_containers, len(candidates),
+            note_limit(ds, "container_files", ctx.max_container_files, len(candidates),
                        "глубокий разбор Unity-контейнеров")
-        for p in candidates[: ctx.max_containers]:
+        for p in candidates[: ctx.max_container_files]:
             try:
                 env = UnityPy.load(str(p))
             except Exception:

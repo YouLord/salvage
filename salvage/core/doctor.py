@@ -157,9 +157,15 @@ def run_doctor(ds: Dataset) -> dict:
 
     score = max(0, 100 + sum(item["penalty"] for item in breakdown))
 
+    # если скан упёрся в лимиты — «отлично» было бы враньём
+    truncated = bool(ds.meta.get("truncated"))
+    if truncated:
+        score = min(score, 89)      # «отлично» при неполном скане не выдаём
     verdict = ("отлично" if score >= 90 else
                "хорошо" if score >= 75 else
                "требует внимания" if score >= 50 else "проблемный проект")
+    if truncated:
+        verdict = f"{verdict} (скан неполный)"
 
     return {
         "score": score,
@@ -172,6 +178,7 @@ def run_doctor(ds: Dataset) -> dict:
         "findings": {"error": len(by["error"]), "warn": len(by["warn"]),
                      "info": len(by["info"])},
         "score_breakdown": breakdown,
+        "scan_truncated": truncated,
     }
 
 

@@ -40,6 +40,13 @@ def render_markdown(ds: Dataset) -> str:
     a(f"# Аудит ассетов: {ds.engine_name}")
     a("")
     a(f"**Каталог:** `{ds.root}`  ")
+    if ds.meta.get("truncated"):
+        limits = ds.meta.get("limits") or {}
+        hit = ", ".join(f"{k} (лимит {v.get('limit')})" for k, v in limits.items()
+                        if v.get("hit"))
+        a(f"> **СКАН НЕПОЛНЫЙ**: сработали лимиты — {hit or 'см. meta.limits'}.  ")
+        a("> Отчёт не должен читаться как полный инвентарь.  ")
+        a("")
     a(f"**Движок:** {ds.engine_name} (уверенность {ds.score:.2f})  ")
     a(f"**Файлов:** {human_int(ds.total_files)} · **Объём:** {human_bytes(ds.total_size)}  ")
     a(f"**Находок:** {errors} ошибок · {warns} предупреждений · {len(ds.findings)} всего")
