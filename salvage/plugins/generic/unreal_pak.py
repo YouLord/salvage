@@ -47,10 +47,25 @@ class PakEntry:
     encrypted: bool = False
     blocks: list[tuple[int, int]] = field(default_factory=list)
 
+    # Имя метода: 0 — без сжатия, 1 — zlib; остальные индексы ссылаются на
+    # таблицу имён из footer (v8+), поэтому «0x10» само по себе ничего не значит.
+    compression_name: str = ""
+    header_size: int = 0        # размер сериализованного заголовка записи в индексе
+
+    @property
+    def data_offset(self) -> int:
+        """Данные начинаются ПОСЛЕ заголовка записи (offset указывает на заголовок)."""
+        return self.offset + self.header_size
+
     @property
     def compression(self) -> str:
-        return {0: "none", 1: "zlib", 0x10: "bias-memory", 0x20: "bias-speed"}.get(
-            self.method, f"0x{self.method:x}")
+        if self.method == 0:
+            return "none"
+        if self.method == 1:
+            return "zlib"
+        if self.compression_name:
+            return self.compression_name.lower()
+        return f"0x{self.method:x}"
 
 
 @dataclass
@@ -113,6 +128,7 @@ def read_pak(path: Path) -> PakFile:
         compression_names: list[str] = []
         if version >= 8:
             n = FOOTER_TABLE[version][4]
+            # от magic: +4 version, +8 index offset, +8 index size, +20 sha1 = +44
             f.seek(magic_off + 44 + (1 if version == 9 else 0))
             raw = f.read(32 * n)
             compression_names = [raw[i * 32:(i + 1) * 32].split(b"\x00")[0].decode("ascii", "ignore")
@@ -131,6 +147,10 @@ def read_pak(path: Path) -> PakFile:
         except zlib.error:
             pass  # индекс может быть несжатым
         mount, entries = _parse_index(index, version)
+        # подтягиваем имена методов сжатия из footer (v8+) к записям
+        for e in entries:
+            if 0 < e.method < len(compression_names):
+                e.compression_name = compression_names[e.method]
         return PakFile(path=path, version=version, mount_point=mount,
                        entries=entries, encrypted_index=encrypted_index,
                        compression_names=compression_names, footer_offset=magic_off)
@@ -154,8 +174,16 @@ def _read_fstring(buf: bytes, p: int) -> tuple[str, int]:
 
 
 def _parse_entry(buf: bytes, p: int, version: int) -> tuple[PakEntry, int]:
+    start_p = p
+    if p + 28 > len(buf):
+        raise PakError("индекс обрезан: нет заголовка записи")
     offset, size, unc, method = struct.unpack_from("<QQQI", buf, p)
     p += 28
+    # поля проверяем до чтения блоков/хвоста: битый индекс не должен
+    # приводить к «правдоподобным» записям (это тихо неправильный результат).
+    total = len(buf)
+    if offset > (1 << 40) or size > (1 << 40) or unc > (1 << 40):
+        raise PakError("индекс обрезан/повреждён: размеры записи вне разумных пределов")
     if version <= 1:
         p += 8  # timestamp
     p += 20  # sha1
@@ -164,8 +192,12 @@ def _parse_entry(buf: bytes, p: int, version: int) -> tuple[PakEntry, int]:
     if version >= 3:
         block_count = 0
         if method != 0:
+            if p + 4 > total:
+                raise PakError("индекс обрезан: нет block count")
             block_count = struct.unpack_from("<I", buf, p)[0]
             p += 4
+            if block_count > 1 << 20:
+                raise PakError("индекс повреждён: слишком много блоков")
             for _ in range(block_count):
                 start, end = struct.unpack_from("<QQ", buf, p)
                 blocks.append((start, end))
@@ -176,7 +208,8 @@ def _parse_entry(buf: bytes, p: int, version: int) -> tuple[PakEntry, int]:
     if version >= 4:
         p += 1  # unknown
     return PakEntry(name="", offset=offset, size=size, uncompressed=unc,
-                    method=method, encrypted=encrypted, blocks=blocks), p
+                    method=method, encrypted=encrypted, blocks=blocks,
+                    header_size=p - start_p), p
 
 
 def _parse_index(index: bytes, version: int) -> tuple[str, list[PakEntry]]:
@@ -255,6 +288,7 @@ def _parse_fdi(buf: bytes, p: int, enc_start: int, enc_size: int) -> list[PakEnt
 
 def decode_encoded_entry(buf: bytes, p: int) -> PakEntry:
     """Encoded entry (v10+): битовое поле + переменные поля."""
+    start_p = p
     bits = struct.unpack_from("<I", buf, p)[0]
     p += 4
     block_size = (bits & 0x3F) << 11
@@ -286,39 +320,120 @@ def decode_encoded_entry(buf: bytes, p: int) -> PakEntry:
         for _ in range(block_count):
             blocks.append((block_size, 0))
     return PakEntry(name="", offset=offset, size=size, uncompressed=unc,
-                    method=method, encrypted=encrypted, blocks=blocks)
+                    method=method, encrypted=encrypted, blocks=blocks,
+                    header_size=p - start_p)
 
 
 # ---------------------------------------------------------------------------
 # Извлечение
 # ---------------------------------------------------------------------------
 
+def _block_decompress(chunk: bytes, method: int, name: str,
+                      expected: int | None) -> tuple[bytes | None, str]:
+    """Распаковать один блок согласно методу. Возвращает (данные, статус)."""
+    lowered = (name or "").lower()
+    if method == 1:
+        try:
+            return zlib.decompress(chunk), "ok"
+        except zlib.error as exc:
+            return None, f"error:zlib:{exc}"
+    if "lz4" in lowered:
+        try:
+            import lz4.block  # type: ignore
+        except Exception:
+            return None, "unsupported:lz4-python-missing"
+        try:
+            return lz4.block.decompress(chunk, uncompressed_size=expected or 0), "ok"
+        except Exception as exc:
+            # LZ4-блок в UE может нести собственный заголовок размера
+            try:
+                return lz4.block.decompress(chunk), "ok"
+            except Exception:
+                return None, f"error:lz4:{exc}"
+    if "oodle" in lowered or "kraken" in lowered or "mermaid" in lowered:
+        return None, "unsupported:oodle"
+    if "zstd" in lowered:
+        try:
+            import zstandard  # type: ignore
+            return zstandard.ZstdDecompressor().decompress(chunk), "ok"
+        except Exception:
+            return None, "unsupported:zstd-python-missing"
+    return None, f"compression:{method}"
+
+
 def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tuple[bytes | None, str]:
-    """Прочитать данные записи. Возвращает (данные, статус)."""
+    """Прочитать данные записи. Возвращает (данные, статус).
+
+    Статусы: "ok", "encrypted", "unsupported:<метод>", "compression:<метод>",
+    "error:<причина>". Никогда не возвращает «похожие на данные» байты при ошибке.
+    """
     if e.encrypted:
         return None, "encrypted"
+    name = e.compression_name
+    if not name and 0 < e.method < len(pak.compression_names):
+        name = pak.compression_names[e.method] or ""
+    base = e.data_offset
     try:
         with open(pak.path, "rb") as f:
             if e.method == 0:
-                f.seek(e.offset)
+                f.seek(base)
                 return f.read(min(e.size, max_bytes)), "ok"
-            if e.method != 1:
-                return None, f"compression:{e.method}"
             out = bytearray()
-            if e.blocks:
-                for i, (start, end) in enumerate(e.blocks):
-                    if end and end > start:
-                        f.seek(start)
-                        chunk = f.read(end - start)
+            if e.blocks and any(b_end for _, b_end in e.blocks):
+                # v3–v9: явные (start,end) — АБСОЛЮТНЫЕ смещения в файле
+                for start, end in e.blocks:
+                    f.seek(start)
+                    chunk = f.read(max(0, end - start))
+                    part, status = _block_decompress(chunk, e.method, name,
+                                                     _per_block_hint(e, len(e.blocks)))
+                    if part is None:
+                        return None, status
+                    out += part
+                    if len(out) > max_bytes:
+                        break
+            elif e.blocks:
+                # v10+: блоки без смещений. Формат UE:
+                #   при block_count > 1 каждый блок: [uint32 csize][данные]
+                #   при block_count == 1: сплошной поток
+                block_size = e.blocks[0][0] or 65536
+                f.seek(base)
+                remaining = e.size
+                per = _per_block_hint(e, len(e.blocks)) if len(e.blocks) > 1 else e.uncompressed
+                while remaining > 0:
+                    if len(e.blocks) > 1:
+                        head = f.read(4)
+                        if len(head) < 4:
+                            return None, "error:truncated-block"
+                        csize = struct.unpack("<I", head)[0]
+                        chunk = f.read(csize)
+                        remaining -= 4 + csize
                     else:
-                        # v10: блоки без смещений — читаем последовательно по размеру
-                        chunk = f.read(start)
-                    out += zlib.decompress(chunk)
+                        chunk = f.read(remaining)
+                        remaining = 0
+                    part, status = _block_decompress(chunk, e.method, name, per)
+                    if part is None:
+                        return None, status
+                    out += part
                     if len(out) > max_bytes:
                         break
             else:
-                f.seek(e.offset)
-                out += zlib.decompress(f.read(min(e.size, max_bytes)))
+                f.seek(base)
+                chunk = f.read(min(e.size, max_bytes))
+                part, status = _block_decompress(chunk, e.method, name, e.uncompressed)
+                if part is None:
+                    return None, status
+                out += part
             return bytes(out[:max_bytes]), "ok"
-    except (OSError, zlib.error) as exc:
+    except OSError as exc:
         return None, f"error:{exc}"
+
+
+def _per_block_hint(e: PakEntry, count: int) -> int | None:
+    """Ожидаемый размер распаковки одного блока (для LZ4 без store_size)."""
+    if count <= 0:
+        return e.uncompressed or None
+    if count == 1:
+        return e.uncompressed or None
+    # последний блок может быть короче; берём типичный размер блока
+    block = e.blocks[0][0] if e.blocks else 0
+    return block or (e.uncompressed // count if e.uncompressed else None)

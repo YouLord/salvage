@@ -82,6 +82,26 @@ class TestRegressions(unittest.TestCase):
         self.assertGreaterEqual(summary["extracted"], 4, "RGSS не извлечён без ключа")
         self.assertTrue(list((out / "rgss").rglob("*.png")))
 
+    def test_regression_ue_offset_semantics(self) -> None:
+        """Баг: данные читались прямо с offset записи, без её заголовка.
+
+        Настоящий .pak: offset → заголовок записи, данные — после него.
+        Если вернуть старое поведение, zlib/ LZ4 сразу сломаются на неверных байтах.
+        """
+        import importlib
+        from salvage.plugins.generic import unreal_pak
+        mod = importlib.import_module("make_fixture_unreal")
+        game = Path(tempfile.mkdtemp(prefix="ue-bug-", dir=self.tmp)) / "ue"
+        mod.build(game, with_bug=True)
+        pak = unreal_pak.read_pak(game / "pakchunk0-WindowsNoEditor.pak")
+        self.assertEqual(len(pak.entries), 3)
+        for e in pak.entries:
+            self.assertGreater(e.header_size, 0, "не вычислен размер заголовка записи")
+            self.assertNotEqual(e.offset, e.data_offset)
+            data, status = unreal_pak.read_entry_data(pak, e)
+            self.assertEqual(status, "ok", f"{e.name}: {status}")
+            self.assertTrue(data is not None and len(data) == e.uncompressed)
+
     def test_fixtures_deterministic(self) -> None:
         """Бинарные фикстуры должны пересобираться в те же байты."""
         a = Path(tempfile.mkdtemp(prefix="fix-a-", dir=self.tmp))
