@@ -32,6 +32,8 @@ class GodotPlugin(EnginePlugin):
             name = p.name.lower()
             ext = p.suffix.lower()
             if ext == ".pck":
+                if head_bytes(p, 4) == b"AKPK":
+                    continue  # Wwise, не Godot
                 pck += 1
             elif name == "project.godot":
                 proj += 1
@@ -80,8 +82,18 @@ class GodotPlugin(EnginePlugin):
             if magic == "godot_pck":
                 pcks.append(p)
             elif low.endswith(".pck"):
-                a.extra["pck_unrecognized"] = True
-                pcks.append(p)
+                head = head_bytes(p, 4)
+                if head == b"AKPK":
+                    # Wwise-банк: чужой формат, разбирает generic (--engine generic/auto)
+                    a.extra["foreign_pck"] = "wwise"
+                    a.kind = "archive"
+                    ds.add_finding(
+                        "info", "wwise_pck_in_godot",
+                        f"{rel}: Wwise .pck (AKPK), не Godot PCK",
+                        "Разбор Wwise доступен через --engine generic; здесь файл не трогаем.")
+                else:
+                    a.extra["pck_unrecognized"] = True
+                    pcks.append(p)
             elif low.endswith((".tscn", ".tres")):
                 text_scenes.append(p)
             elif low.endswith("project.godot"):

@@ -73,5 +73,26 @@ class TestWwise(unittest.TestCase):
         self.assertTrue(ds.meta["wwise_wem_status"])
 
 
+class TestWwisevsGodot(unittest.TestCase):
+    """Godot-плагин не должен присваивать Wwise .pck (magic AKPK)."""
+
+    def test_godot_detect_rejects_akpk(self) -> None:
+        from salvage.plugins.godot.plugin import GodotPlugin
+        root = FIX / "wwise"
+        plugin = GodotPlugin()
+        score, evidence = plugin.detect(root)
+        self.assertLess(score, 0.35, f"Godot заявил Wwise-пакеты: {evidence}")
+
+    def test_godot_scan_marks_foreign(self) -> None:
+        from salvage.core.plugin_base import EngineContext
+        from salvage.plugins.godot.plugin import GodotPlugin
+        plugin = GodotPlugin()
+        ds = plugin.scan(FIX / "wwise", EngineContext())
+        asset = next(a for a in ds.assets if a.path.endswith("Audio.pck"))
+        self.assertEqual(asset.extra.get("foreign_pck"), "wwise")
+        self.assertNotIn("pck_unrecognized", asset.extra)
+        self.assertTrue(any(f.code == "wwise_pck_in_godot" for f in ds.findings))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

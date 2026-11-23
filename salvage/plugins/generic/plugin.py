@@ -55,6 +55,10 @@ class GenericPlugin(EnginePlugin):
             low = rel.lower()
             for engine, needles in ENGINE_CLUES.items():
                 if any(n.lower() in low for n in needles):
+                    # .pck — не улика Godot, если это Wwise-банк (magic AKPK)
+                    if engine == "godot" and low.endswith(".pck") \
+                            and head_bytes(p, 4) == b"AKPK":
+                        continue
                     clues.setdefault(engine, [])
                     if len(clues[engine]) < 5:
                         clues[engine].append(rel)
