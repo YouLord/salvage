@@ -17,7 +17,7 @@ from fixture_base import ensure_dir, png_stub, det_bytes  # noqa: F401
 def make_fmod(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
 
-    # Реальная раскладка FSB5 v1 (см. vgmstream fsb5.c):
+    # Реальная раскладка FSB5 v1:
     #   база 0x3C, затем заголовки сэмплов (64-битное поле + цепочки чанков),
     #   таблица имён (uint32-офсеты), данные. Смещение данных — в единицах
     #   по 32 байта (биты 8..33), число сэмплов — биты 34..63.

@@ -2,9 +2,10 @@
 
 **Аудит и восстановление ассетов игр. Не только Unity.**
 
-`salvage` — открытый инструмент в духе [AssetRipper](https://github.com/AssetRipper/AssetRipper), построенный как
-**мультидвижковое ядро с плагинами**: Unity, Godot, GameMaker Studio, RPG Maker (MV/MZ/XP/VX/Ace), Ren'Py
-и универсальный слой (Unreal `.pak`, FMOD FSB, Wwise, zip, неизвестные сборки).
+`salvage` — самостоятельный инструмент на **мультидвижковом ядре с плагинами**: Unity, Godot,
+GameMaker Studio, RPG Maker (MV/MZ/XP/VX/Ace), Ren'Py и универсальный слой
+(Unreal `.pak`, FMOD FSB, Wwise, zip, неизвестные сборки).
+Вся реализация — собственная: свои форматы-парсеры, свои модели данных, свой отчёт.
 
 Две задачи, которые решает инструмент:
 
@@ -151,15 +152,13 @@ class MyGamePlugin(EnginePlugin):
 Зарегистрируйте класс в `core/registry.py::build_registry()` — отчёты, doctor, дубликаты,
 секреты и CLI подхватят его автоматически.
 
-## Происхождение идей и лицензия
+## Лицензия и зависимости
 
-- Вдохновение архитектурой **[AssetRipper](https://github.com/AssetRipper/AssetRipper)** (GPL-3.0),
-  [gm-extract](https://github.com/nazarhktwitch/gm-extract) и [UndertaleModTool](https://github.com/UndertaleModTool)
-  (идеи по чанкам GameMaker), [unrpyc](https://github.com/CensoredUsername/unrpyc) (подход к RPYC),
-  [u4pak](https://github.com/panzi/rust-u4pak) (layout `.pak`). **Код этих проектов не копировался**;
-  реализации написаны с нуля по спецификациям форматов.
-- Глубокий Unity-разбор — через **[UnityPy](https://github.com/K0lb3/UnityPy)** (MIT, по желанию).
-- `salvage` — MIT. Используйте только на своих или явно разрешённых сборках.
+- `salvage` — собственная реализация: парсеры форматов, модели данных, отчёты и CLI
+  написаны с нуля в этом репозитории.
+- Глубокий Unity-разбор может использовать **[UnityPy](https://github.com/K0lb3/UnityPy)**
+  (MIT) — только как опциональную зависимость (`pip install salvage[unity]`).
+- Лицензия `salvage` — MIT. Используйте только на своих или явно разрешённых сборках.
 
 ## Roadmap
 

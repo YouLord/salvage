@@ -95,7 +95,7 @@ def read_fsb5(path: Path) -> FsbFile:
         raise FsbError("не FSB5")
     (version, num_samples, shdr_size, name_size, data_size, mode) = \
         struct.unpack_from("<iiiiii", data, 4)
-    # vgmstream: FSB5 v0 — 0x40 байт заголовка, v1 — 0x3C (есть флаги на 0x20)
+    # FSB5 v0 — 0x40 байт заголовка, v1 — 0x3C (есть флаги на 0x20)
     header_end = 0x3C if version == 1 else 0x40
     if len(data) < header_end:
         raise FsbError("обрезанный заголовок FSB5")
@@ -114,7 +114,7 @@ def read_fsb5(path: Path) -> FsbFile:
 def _read_fsb5_headers(data: bytes, p: int, count: int, data_start: int) -> list[FsbSample]:
     """FSB5: заголовок сэмпла — одно 64-битное поле + цепочка чанков.
 
-    Раскладка (vgmstream/fsb5.c): биты 0 — extra-флаг, 1..5 — частота,
+    Раскладка: биты 0 — extra-флаг, 1..5 — частота,
     6..7 — код каналов (0→1, 1→2, 2→6, 3→8), 8..33 — смещение данных
     в единицах по 32 байта от начала data-секции, 34..63 — число сэмплов.
     """
