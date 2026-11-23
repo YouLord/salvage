@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+# Версия схемы scan.json. Правила совместимости — в ROADMAP.md.
+# 1 — текущая: engine/totals/meta/assets/findings/extraction + schema_version.
+SCHEMA_VERSION = 1
+
 SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2, "ok": 3}
 SEVERITY_TITLES = {
     "error": "ОШИБКА",
@@ -135,7 +139,11 @@ class Dataset:
         return sorted(self.assets, key=lambda a: a.size, reverse=True)[:n]
 
     def to_dict(self, asset_limit: int = 50_000) -> dict[str, Any]:
+        from .. import __version__
+
         return {
+            "schema_version": SCHEMA_VERSION,
+            "generator_version": __version__,
             "engine": self.engine_slug,
             "engine_name": self.engine_name,
             "detection_score": round(self.score, 3),

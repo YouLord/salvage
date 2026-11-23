@@ -129,6 +129,20 @@ def render_html(ds: Dataset) -> str:
         for label, val in rows:
             p(f"<tr><td class='dim'>{label}</td><td class='num'>{val}</td></tr>")
         p("</table></div></section>")
+        breakdown = doctor.get("score_breakdown") or []
+        if breakdown:
+            p("<section><h2>Из чего сложилась оценка</h2><div class='body'>"
+              "<table><tr><th>правило</th><th>случаев</th><th>вес</th>"
+              "<th>списано</th></tr>")
+            for item in breakdown:
+                p(f"<tr><td class='dim'>{_esc(item['title'])}</td>"
+                  f"<td class='num'>{item['cases']}</td>"
+                  f"<td class='num'>{item['weight']}</td>"
+                  f"<td class='num'>{item['penalty']}</td></tr>")
+            total_penalty = sum(i["penalty"] for i in breakdown)
+            p(f"<tr><td><b>итог</b></td><td class='num'></td><td class='num'></td>"
+              f"<td class='num'><b>{total_penalty}</b></td></tr>")
+            p("</table></div></section>")
 
     # --- извлечение ---
     if ds.extraction:

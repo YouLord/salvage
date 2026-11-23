@@ -34,7 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     def common(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("path", help="каталог игры или проекта")
         sp.add_argument("--engine", default=None,
-                        help="форсировать движок: " + ", ".join(sorted(build_registry())))
+                        choices=sorted(build_registry()),
+                        metavar="ENGINE",
+                        help="форсировать движок: " + ", ".join(sorted(build_registry()))
+                             + " (без флага — автодетект, generic — запасной)")
         sp.add_argument("--deep", action="store_true",
                         help="глубокий скан: разбор контейнеров, зависимости")
         sp.add_argument("--no-hash", action="store_true", help="не считать sha256")
@@ -69,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="декомпилировать .rpyc в приближённый .rpy (по умолчанию)")
     sp_x.add_argument("--rpyc-strings", dest="rpyc_full", action="store_false",
                       help="только извлекать строки из .rpyc")
+    sp_x.add_argument("--max-asset-bytes", type=int, default=16 << 20,
+                      help="лимит одного извлекаемого файла, байт (по умолчанию 16 МиБ)")
 
     sp_a = sub.add_parser("audit", help="scan + отчёт одной командой (по умолчанию html+json+md)")
     common(sp_a)
@@ -114,6 +119,7 @@ def _ctx_from_args(args) -> EngineContext:
     return EngineContext(
         deep=args.deep,
         hash_files=not args.no_hash,
+        max_asset_bytes=getattr(args, "max_asset_bytes", 16 << 20),
         exclude=[Path(p) for p in args.exclude],
     )
 

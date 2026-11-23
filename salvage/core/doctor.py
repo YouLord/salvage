@@ -134,17 +134,28 @@ def run_doctor(ds: Dataset) -> dict:
     containers = check_containers(ds)
     by = ds.findings_by_severity()
 
-    score = 100
     # PNG с нулевыми размерами — тоже битые (просто заголовок валиден)
     zero_dim_pngs = [p for p in pngs if p["width"] == 0 or p["height"] == 0]
-    score -= min(30, (media["counts"]["bad_images"] + len(zero_dim_pngs)) * 2)
-    score -= min(20, media["counts"]["bad_audio"] * 2)
-    score -= min(10, media["counts"]["empty"] * 2)
-    score -= min(15, len(pngs) * 2)
-    score -= min(15, containers["counts"]["empty"] * 3)
-    score -= min(10, len(by["error"]) * 2)
-    score -= min(10, len(by["warn"]))
-    score = max(0, score)
+
+    # Каждое слагаемое: сколько случаев, вес, потолок, что именно списано.
+    breakdown: list[dict] = []
+
+    def dock(rule: str, title: str, cases: int, weight: int, cap: int) -> None:
+        raw = cases * weight
+        delta = -min(cap, raw)
+        breakdown.append({"rule": rule, "title": title, "cases": cases,
+                          "weight": weight, "cap": cap, "penalty": delta})
+
+    dock("bad_image", "битые изображения", media["counts"]["bad_images"]
+         + len(zero_dim_pngs), 2, 30)
+    dock("bad_audio", "битые аудио", media["counts"]["bad_audio"], 2, 20)
+    dock("empty_asset", "пустые файлы", media["counts"]["empty"], 2, 10)
+    dock("bad_png_dims", "аномальные PNG-размеры", len(pngs), 2, 15)
+    dock("empty_container", "контейнеры без содержимого", containers["counts"]["empty"], 3, 15)
+    dock("error_findings", "находки-ошибки", len(by["error"]), 2, 10)
+    dock("warn_findings", "находки-предупреждения", len(by["warn"]), 1, 10)
+
+    score = max(0, 100 + sum(item["penalty"] for item in breakdown))
 
     verdict = ("отлично" if score >= 90 else
                "хорошо" if score >= 75 else
@@ -160,6 +171,7 @@ def run_doctor(ds: Dataset) -> dict:
         "containers": containers,
         "findings": {"error": len(by["error"]), "warn": len(by["warn"]),
                      "info": len(by["info"])},
+        "score_breakdown": breakdown,
     }
 
 
@@ -182,6 +194,16 @@ def doctor_markdown(report: dict) -> str:
         f"предупреждения {report['findings']['warn']}",
         "",
     ]
+    breakdown = report.get("score_breakdown") or []
+    if breakdown:
+        lines.append("## Из чего сложилась оценка")
+        lines.append("")
+        lines.append("| правило | случаев | вес | списано |")
+        lines.append("|---|---:|---:|---:|")
+        for item in breakdown:
+            lines.append(f"| {item['title']} | {item['cases']} | {item['weight']} "
+                         f"| {item['penalty']} |")
+        lines.append("")
     if m["bad_images"]:
         lines.append("## Битые изображения")
         lines += [f"- `{x['path']}` (первые байты: {x['head']})" for x in m["bad_images"][:30]]

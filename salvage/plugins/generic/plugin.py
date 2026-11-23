@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 
 from ...core.model import Dataset
-from ...core.plugin_base import EngineContext, EnginePlugin
+from ...core.plugin_base import EngineContext, EnginePlugin, note_limit
 from ...core.util import (classify, head_bytes, human_bytes, human_int, iter_files,
                           rel_posix, safe_rel, sha256_file, sniff_magic)
 from .._shared import copy_verbatim
@@ -47,8 +47,10 @@ class GenericPlugin(EnginePlugin):
         akpks: list[Path] = []
         bnk_wwise: list[Path] = []
         checked = 0
+        capped = False
         for p in iter_files(root, exclude=ctx.exclude):
-            if checked > 200_000:
+            if checked >= ctx.max_files:
+                capped = True
                 break
             checked += 1
             rel = rel_posix(p, root.resolve())
@@ -74,6 +76,8 @@ class GenericPlugin(EnginePlugin):
             elif ext == ".bnk" and head_bytes(p, 4) == b"BKHD":
                 bnk_wwise.append(p)
 
+        if capped:
+            note_limit(ds, "files", ctx.max_files, checked, "просмотр файлов")
         if clues:
             ds.meta["engine_clues"] = clues
             best = max(clues, key=lambda k: len(clues[k]))
@@ -164,6 +168,8 @@ class GenericPlugin(EnginePlugin):
 
     # ------------------------------------------------------------------
     def _scan_paks(self, ds: Dataset, paks: list[Path], ctx: EngineContext) -> None:
+        if len(paks) > 200:
+            note_limit(ds, "paks", 200, len(paks), "разбор UE .pak")
         info = []
         for p in paks[:200]:
             rel = rel_posix(p, ds.root)
@@ -201,6 +207,8 @@ class GenericPlugin(EnginePlugin):
 
     # ------------------------------------------------------------------
     def _scan_banks(self, ds: Dataset, banks: list[Path]) -> None:
+        if len(banks) > 300:
+            note_limit(ds, "banks", 300, len(banks), "разбор FMOD-банков")
         for p in banks[:300]:
             rel = rel_posix(p, ds.root)
             try:
@@ -277,19 +285,23 @@ class GenericPlugin(EnginePlugin):
     def _extract_paks(self, dataset: Dataset, dest: Path, ctx: EngineContext,
                       only_kinds: set[str] | None) -> dict:
         out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
+        statuses: dict[str, int] = {}
         paks: dict[str, object] = dataset.meta.get("ue_pak_objects") or {}
         for rel, pak in paks.items():
             for e in pak.entries:
                 if only_kinds and classify(e.name) not in only_kinds:
                     out["skipped"] += 1
+                    statuses["filtered"] = statuses.get("filtered", 0) + 1
                     continue
                 data, status = unreal_pak.read_entry_data(pak, e, ctx.max_asset_bytes)
                 if data is None:
-                    if status == "encrypted":
-                        out["skipped"] += 1
-                    else:
-                        out["skipped"] += 1
+                    # статус просрочен в отчёт: «пропущено» не должно скрывать причину
+                    out["skipped"] += 1
+                    statuses[status] = statuses.get(status, 0) + 1
+                    if status != "encrypted":
+                        out["errors"] += 1
                     continue
+                statuses[status] = statuses.get(status, 0) + 1
                 target = dest / "pak" / Path(rel).stem / safe_rel(e.name)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
@@ -297,8 +309,10 @@ class GenericPlugin(EnginePlugin):
                 if len(out["samples"]) < 10:
                     out["samples"].append(f"{rel}:{e.name}")
         if out["extracted"] or out["skipped"]:
+            detail = ", ".join(f"{k}×{v}" for k, v in sorted(statuses.items()))
             out["message"] = (f"UE .pak: извлечено {out['extracted']}, "
-                              f"пропущено {out['skipped']} (шифрование/сжатие).")
+                              f"пропущено {out['skipped']} ({detail}).")
+            dataset.meta["ue_pak_statuses"] = statuses
         return out
 
     def _extract_banks(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:

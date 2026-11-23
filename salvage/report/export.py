@@ -72,6 +72,16 @@ def render_markdown(ds: Dataset) -> str:
         a(f"- битые изображения: {m['bad_images']} · аудио: {m['bad_audio']} · пустые: {m['empty']}")
         a(f"- аномальные PNG: {len(doctor['pngs'])}")
         a(f"- контейнеры без содержимого: {doctor['containers']['counts']['empty']}")
+        breakdown = doctor.get("score_breakdown") or []
+        if breakdown:
+            a("")
+            a("Из чего сложилась оценка:")
+            a("")
+            a("| правило | случаев | вес | списано |")
+            a("|---|---:|---:|---:|")
+            for item in breakdown:
+                a(f"| {item['title']} | {item['cases']} | {item['weight']} "
+                  f"| {item['penalty']} |")
         a("")
     if ds.extraction:
         a("## Извлечение")
