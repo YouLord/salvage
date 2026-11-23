@@ -27,6 +27,9 @@ MODULES = {
     "renpy": "make_fixture_renpy",
     "ue": "make_fixture_unreal",
     "fmod": "make_fixture_fmod",
+    "fmod_vorbis": "make_fixture_fmod_vorbis",
+    "wwise": "make_fixture_wwise",
+    "ue_lz4": "make_fixture_unreal_lz4",
 }
 
 
