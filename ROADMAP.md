@@ -118,7 +118,7 @@
 
 | Область | Статус | Чем подтверждено |
 |---|---|---|
-| **RGSS v2 (`.rgss2a`)** — VX объявляет версию 1; явная поддержка + тест | ✅ | `test_regressions` (RGSS v1/v2/v3, байт-в-байт), `make_fixture_rpgmaker_xp.py` |
+| **`.rgss2a` (VX)** — формата v2 не существует: VX пишет `RGSSAD\x00\x01` | ✅ | `test_rgss_version2_semantics`: байт 1 (родной) и байт 2 (патченный) читаются схемой v1 байт-в-байт; чужой байт → 0 файлов |
 | **Wwise `.pck` (AKPK)** → `.wem`, **`.bnk` (BKHD/DIDX/DATA)** → `.wem` | ✅ | `make_fixture_wwise.py`; `test_wwise.py`: индекс, sha256 каждого wem, сквозной extract |
 | **Vorbis Wwise не маскируется под `.ogg`**: `vorbis-ogg-like` → `.ogg`, `vorbis-wwise`/прочие → `.wem` со статусом | ✅ | `test_wwise.py`, статусы в `meta.wwise_wem_status` и в summary |
 | **FMOD FSB5 Vorbis** → валидный OggS (CRC, granule, serial; подбор блоксайза декодером) | ✅ | `make_fixture_fmod_vorbis.py` (libvorbis → FSB5 → Ogg, corr 1.0 при наличии `soundfile`); без декодера — статус `decode-silent`/`structural-only` |
@@ -145,6 +145,20 @@
 - SARIF-вывод (приоритет 3) появится **после** стабилизации схемы.
 
 ---
+
+## RGSS: версии архива (проверено по эталонам)
+
+| Байт версии | Что это | Схема |
+|---|---|---|
+| 1 | XP (`.rgssad`) **и VX (`.rgss2a`)** — VX пишет ту же версию 1 | ключ 0xDEADCAFE, `key = key*7+3` на каждое поле |
+| 2 | **не формат**: патченные VX-сборки; раскладка та же, что v1 | читаем как v1 + находка `rgss_version_patched` (info) |
+| 3 | VX Ace (`.rgss3a`) | seed в заголовке, отдельный ключ на файл |
+| иное | неизвестно | `rgss_unknown_version` (warn), файлы не выдумываются |
+
+Источники, на которых это сверено: rpgo (`RGASSDv1 = 1` для RMXP **и** RMVX,
+`VxArchiveName = "Game.rgss2a"`) и разбор RPGMakerDecrypter (RGSSADv1
+обслуживает и XP, и VX). Сайты-«конвертеры» утверждают обратное — код-эталоны
+единогласны, поэтому реализация следует им, а не маркетинговому тексту.
 
 ## Unreal .pak: семантика поля method (зафиксировано)
 

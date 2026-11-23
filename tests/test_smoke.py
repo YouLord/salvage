@@ -228,22 +228,30 @@ class TestFixtures(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
 
     def test_rgss_v2_rgss2a(self) -> None:
-        """VX: явная версия 2 (.rgss2a) — та же раскладка, что v1, байт-в-байт."""
+        """VX: .rgss2a объявляет версию 1 (эталон: rpgo/RPGMakerDecrypter).
+
+        Формата v2 не существует. Проверяем оба реальных случая:
+          * Game.rgss2a — родной байт 1, схема v1;
+          * vx_b2.rgss2a — патченный байт 2, та же схема, байт-в-байт.
+        """
         import hashlib
-        from salvage.plugins.rpgmaker.plugin import parse_rgss_entries, extract_rgss_file
-        path = FIX / "rm_xp" / "Game.rgss2a"
-        with open(path, "rb") as f:
-            self.assertEqual(f.read(8)[7], 2)
-            entries = parse_rgss_entries(f, 2)
-            self.assertEqual(len(entries), 3)
-            expected = json.loads((FIX / "rm_xp" / "expected_rgss_v2.json").read_text("utf-8"))
-            by_name = {e["name"]: e for e in entries}
-            for name, sha in expected.items():
-                self.assertIn(name, by_name)
-                data = extract_rgss_file(f, {"rgss_offset": by_name[name]["offset"],
-                                             "rgss_key": by_name[name]["key"],
-                                             "rgss_size": by_name[name]["size"]})
-                self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
+        from salvage.plugins.rpgmaker.plugin import extract_rgss_file, parse_rgss_entries
+
+        expected = json.loads((FIX / "rm_xp" / "expected_rgss_v2.json").read_text("utf-8"))
+        for filename, magic in (("Game.rgss2a", 1), ("vx_b2.rgss2a", 2)):
+            path = FIX / "rm_xp" / filename
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(8)[7], magic, filename)
+                entries = parse_rgss_entries(f, magic)
+                self.assertEqual(len(entries), 3, filename)
+                by_name = {e["name"]: e for e in entries}
+                for name, sha in expected.items():
+                    self.assertIn(name, by_name, filename)
+                    data = extract_rgss_file(f, {"rgss_offset": by_name[name]["offset"],
+                                                 "rgss_key": by_name[name]["key"],
+                                                 "rgss_size": by_name[name]["size"]})
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), sha,
+                                     f"{filename}:{name}")
 
     def test_ue_pak_byte_exact(self) -> None:
         import hashlib

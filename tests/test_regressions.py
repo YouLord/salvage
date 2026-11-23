@@ -20,6 +20,8 @@ from salvage.core.plugin_base import EngineContext
 from salvage.core.registry import build_registry
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(HERE))
 FIX = HERE / "fixtures"
 
 MODULES = {
@@ -101,6 +103,42 @@ class TestRegressions(unittest.TestCase):
             data, status = unreal_pak.read_entry_data(pak, e)
             self.assertEqual(status, "ok", f"{e.name}: {status}")
             self.assertTrue(data is not None and len(data) == e.uncompressed)
+
+    def test_rgss_version2_semantics(self) -> None:
+        """Версии 2 формата не существует: VX пишет 0x01, а не 0x02.
+
+        Эталон (rpgo / RPGMakerDecrypter): .rgss2a объявляет версию 1 и
+        использует схему XP. Стенд держит три случая: родной 0x01, патченный
+        0x02 (читается той же схемой) и 0x03 (не должен выдавать файлы).
+        """
+        import hashlib
+        import json
+
+        from salvage.plugins.rpgmaker import plugin as rm
+
+        root = FIX / "rm_xp"
+        expected = json.loads((root / "expected_rgss_v2.json").read_text("utf-8"))
+        for name, magic in (("Game.rgss2a", 1), ("vx_b2.rgss2a", 2)):
+            path = root / name
+            head = path.read_bytes()[:8]
+            self.assertEqual(head[7], magic, f"{name}: байт версии")
+            with open(path, "rb") as f:
+                entries = rm.parse_rgss_entries(f, head[7])
+            got = {e["name"]: e for e in entries or []}
+            self.assertEqual(set(got), set(expected), f"{name}: состав файлов")
+            raw = path.read_bytes()
+            for fname, sha in expected.items():
+                e = got[fname]
+                blob = raw[e["offset"]:e["offset"] + e["size"]]
+                dec = rm.decrypt_words(blob, e["key"])
+                # длина уже кратна 4 в фикстуре; сверяем sha256 распакованного
+                self.assertEqual(hashlib.sha256(dec).hexdigest(), sha, fname)
+
+        # байт 3 у .rgss2a — это НЕ v3-схема: ничего не выдумываем
+        weird = root / "vx_b3.rgss2a"
+        with open(weird, "rb") as f:
+            entries = rm.parse_rgss_entries(f, 3)
+        self.assertEqual(entries, [], "v3-схема не должна находить файлы в v1-архиве")
 
     def test_fixtures_deterministic(self) -> None:
         """Бинарные фикстуры должны пересобираться в те же байты."""

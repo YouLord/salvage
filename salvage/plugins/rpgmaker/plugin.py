@@ -198,13 +198,28 @@ class RPGMakerPlugin(EnginePlugin):
                     return
                 version = head[7]
                 f.seek(0)
+                if version not in RGSS_LAYOUT:
+                    ds.add_finding(
+                        "warn", "rgss_unknown_version",
+                        f"{rel}: неизвестная версия RGSSAD {version}",
+                        "Известны 1 (XP/VX), 2 (патченный VX) и 3 (VX Ace); "
+                        "разбор не выполняется, чтобы не выдать мусор за файлы.", path=rel)
+                    return
                 entries = parse_rgss_entries(f, version)
                 if entries is None:
                     ds.add_finding("warn", "rgss_parse",
                                    f"{rel}: не удалось прочитать индекс (v{version})", path=rel)
                     return
+                native = RGSS_NATIVE_VERSIONS.get(version, False)
                 ds.meta.setdefault("rgss", []).append(
-                    {"file": rel, "version": version, "entries": len(entries)})
+                    {"file": rel, "version": version, "entries": len(entries),
+                     "native_version": native})
+                if not native:
+                    ds.add_finding(
+                        "info", "rgss_version_patched",
+                        f"{rel}: нестандартный байт версии {version}",
+                        "Формат v2 не выпускался: это патченный VX-архив. "
+                        "Читается схемой v1, как и оригинал.")
                 ds.add_finding("info", "rgss_map",
                                f"{rel}: RGSSAD v{version}, файлов {human_int(len(entries))}",
                                "Извлечение и расшифровка выполняются при extract.", path=rel)
@@ -448,12 +463,18 @@ def decrypt_words(data: bytes, key: int, advance: bool = True) -> bytes:
     return bytes(out)
 
 
-# Версии RGSS-архива:
-#   1 — XP (.rgssad)
-#   2 — «VX» (.rgss2a). Официальный VX пишет версию 1 (тот же формат, что XP),
-#       но встречаются сборки с байтом 2 и той же раскладкой — читаем так же.
-#   3 — VX Ace (.rgss3a): другой заголовок и отдельные ключи на файл.
+# Версии RGSS-архива. Сверено с эталонными реализациями (rpgo,
+# RPGMakerDecrypter): самостоятельного формата версии 2 НЕ существует.
+#   magic 1 — XP и VX: VX пишет тот же «RGSSAD\x00\x01», просто под именем
+#             Game.rgss2a. Ключ 0xDEADCAFE, key = key*7+3 на каждое поле.
+#   magic 2 — не стандарт; встречается у патченных сборок VX. Раскладка та же,
+#             что в v1, поэтому читаем её как v1 и помечаем в отчёте.
+#   magic 3 — VX Ace: другой заголовок (seed) и ключ на каждый файл.
+#   прочее  — честная ошибка, а не «прочитали как получилось».
 RGSS_LAYOUT = {1: "v1", 2: "v1", 3: "v3"}
+
+# Какие версии объявляет сам движок (а какие — результат сторонних патчей)
+RGSS_NATIVE_VERSIONS = {1: True, 2: False, 3: True}
 
 
 def parse_rgss_entries(f, version: int) -> list[dict] | None:

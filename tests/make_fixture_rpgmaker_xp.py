@@ -76,24 +76,36 @@ def make_rpgmaker_xp(root: Path) -> None:
         body += enc_words(d, 0x0BADF00D)
     (root / "Game.rgss3a").write_bytes(bytes(body))
 
-    # --- v2: VX (.rgss2a) ------------------------------------------------
-    # Официальный VX пишет байт версии 1; но существуют сборки/патчеры с байтом 2
-    # при той же раскладке. Стенд держит ОБА варианта: vx_legacy.rgss2a (v1)
-    # и vx.rgss2a (явная версия 2) — поддержка явного байта 2 регрессируется.
+    # --- VX (.rgss2a) ---------------------------------------------------
+    # Проверено по эталонным реализациям (rpgo, RPGMakerDecrypter): версии 2
+    # формата НЕ существует. VX пишет «RGSSAD\x00\x01» — ту же схему, что XP,
+    # только под именем Game.rgss2a. Стенд держит то, что бывает на диске:
+    #   * vx.rgss2a   — magic 0x01 (как пишет сам VX);
+    #   * vx_b2.rgss2a — magic 0x02 (патченные сборки): читается той же схемой.
+    def _vx_archive(version_byte: int) -> bytes:
+        vx_files = [
+            ("Data/Actors.rvdata", b"\x04\x08[\x06i\x06"),
+            ("Graphics/System/Window.png", png_stub(8, 8)),
+            ("Audio/BGM/vx_theme.ogg", b"OggS" + bytes(range(64))),
+        ]
+        blob = bytearray(b"RGSSAD\x00" + bytes([version_byte]))
+        key = 0xDEADCAFE
+        for name, data in vx_files:
+            nb = name.encode()
+            blob += struct.pack("<I", len(nb) ^ key); key = (key * 7 + 3) & 0xFFFFFFFF
+            blob += enc_words(nb, key); key = advance_key(key, (len(nb) + 3) // 4)
+            blob += struct.pack("<I", len(data) ^ key); key = (key * 7 + 3) & 0xFFFFFFFF
+            blob += enc_words(data, key); key = advance_key(key, (len(data) + 3) // 4)
+        return bytes(blob)
+
     vx_files = [
         ("Data/Actors.rvdata", b"\x04\x08[\x06i\x06"),
         ("Graphics/System/Window.png", png_stub(8, 8)),
         ("Audio/BGM/vx_theme.ogg", b"OggS" + bytes(range(64))),
     ]
-    vx = bytearray(b"RGSSAD\x00\x02")
-    key = 0xDEADCAFE
-    for name, data in vx_files:
-        nb = name.encode()
-        vx += struct.pack("<I", len(nb) ^ key); key = (key * 7 + 3) & 0xFFFFFFFF
-        vx += enc_words(nb, key); key = advance_key(key, (len(nb) + 3) // 4)
-        vx += struct.pack("<I", len(data) ^ key); key = (key * 7 + 3) & 0xFFFFFFFF
-        vx += enc_words(data, key); key = advance_key(key, (len(data) + 3) // 4)
-    (root / "Game.rgss2a").write_bytes(bytes(vx))
+    (root / "Game.rgss2a").write_bytes(_vx_archive(1))       # как у настоящего VX
+    (root / "vx_b2.rgss2a").write_bytes(_vx_archive(2))      # патченный байт версии
+    (root / "vx_b3.rgss2a").write_bytes(_vx_archive(3))      # чужой байт: должен падать
     import hashlib as _h
     (root / "expected_rgss_v2.json").write_text(json.dumps(
         {name: _h.sha256(data).hexdigest() for name, data in vx_files}, indent=1), "utf-8")

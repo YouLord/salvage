@@ -38,12 +38,16 @@ def ensure_dir(root: Path) -> Path:
 
 
 def png_stub(w: int, h: int) -> bytes:
-    """Настоящий PNG 1×1 c заданными размерами в IHDR (плюс шум для энтропии)."""
+    """Настоящий PNG с заданными размерами в IHDR.
+
+    Пиксели ДЕТЕРМИНИРОВАНЫ (det_bytes), иначе фикстура не пересобирается
+    побайтово и любой тест «фикстуры детерминированы» падает через раз.
+    """
     def chunk(tag: bytes, data: bytes) -> bytes:
         c = struct.pack(">I", len(data)) + tag + data
         return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-    raw = b"\x00" + bytes(random.randrange(256) for _ in range(w * 3))
+    raw = b"\x00" + det_bytes(w * 3, seed=f"png:{w}x{h}")
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
