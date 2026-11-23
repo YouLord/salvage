@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
                          help="форматы через запятую: html,json,md")
     sp_scan.add_argument("--max-seconds", type=int, default=0,
                          help="мягкий лимит времени (0 — без лимита; сейчас информативно)")
+    sp_scan.add_argument("--doctor", action="store_true",
+                         help="включить врачебный отчёт (медиа, ссылки, контейнеры)")
 
     sp_x = sub.add_parser("extract", help="извлечь ассеты в каталог")
     common(sp_x)
@@ -57,10 +59,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp_x.add_argument("--report", action="store_true", help="дополнительно построить отчёт")
     sp_x.add_argument("--rm-key", default=None,
                       help="ключ RPG Maker MV/MZ: 32 hex-символа или @путь/к/System.json")
+    sp_x.add_argument("--texture-format", default="png", choices=["png", "qoi", "bz2", "both"],
+                      help="формат текстурных страниц GameMaker (png/qoi/bz2/both)")
+    sp_x.add_argument("--data-json", action="store_true", default=True,
+                      help="конвертировать rxdata/rvdata2 в JSON (по умолчанию вкл.)")
+    sp_x.add_argument("--no-data-json", dest="data_json", action="store_false",
+                      help="не конвертировать данные RPG Maker")
+    sp_x.add_argument("--rpyc-full", action="store_true", default=True,
+                      help="декомпилировать .rpyc в приближённый .rpy (по умолчанию)")
+    sp_x.add_argument("--rpyc-strings", dest="rpyc_full", action="store_false",
+                      help="только извлекать строки из .rpyc")
 
     sp_a = sub.add_parser("audit", help="scan + отчёт одной командой (по умолчанию html+json+md)")
     common(sp_a)
     sp_a.add_argument("--out", default="salvage-report")
+    sp_a.add_argument("--formats", default="html,json,md",
+                      help="форматы через запятую: html,json,md")
+    sp_a.add_argument("--doctor", action="store_true", default=True,
+                      help="врачебный отчёт (по умолчанию включён)")
+    sp_a.add_argument("--no-doctor", dest="doctor", action="store_false")
 
     sp_d = sub.add_parser("detect", help="только определить движок")
     sp_d.add_argument("path")
@@ -76,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_engines()
         if args.cmd == "detect":
             return _cmd_detect(Path(args.path))
+        if args.cmd == "audit" and not hasattr(args, "doctor"):
+            args.doctor = True
         if args.cmd in ("scan", "audit"):
             return _cmd_scan(args)
         if args.cmd == "extract":
@@ -128,6 +147,10 @@ def _cmd_scan(args) -> int:
     ctx = _ctx_from_args(args)
     ds, plugin = scan(Path(args.path), args.engine, ctx)
     _print_summary(ds)
+    if getattr(args, "doctor", False):
+        from .core.doctor import run_doctor
+        ds.meta["doctor"] = run_doctor(ds)
+        _print_doctor(ds.meta["doctor"])
     out = Path(args.out)
     formats = {f.strip().lower() for f in args.formats.split(",") if f.strip()}
     written = []
@@ -155,12 +178,17 @@ def _cmd_extract(args) -> int:
                 print(f"salvage: не удалось прочитать ключ из {key[1:]}: {exc}", file=sys.stderr)
                 return 3
         ctx.keys["rpgmaker"] = key
+    ctx.keys["texture_format"] = args.texture_format
+    ctx.keys["data_json"] = "1" if args.data_json else "0"
+    ctx.keys["rpyc_full"] = "1" if args.rpyc_full else "0"
     ds, plugin = scan(Path(args.path), args.engine, ctx)
     _print_summary(ds)
     kinds = {k.strip().lower() for k in args.kinds.split(",") if k.strip()} or None
     dest = Path(args.out)
     dest.mkdir(parents=True, exist_ok=True)
     summary = plugin.extract(ds, dest, ctx, kinds)
+    ds.extracted_count = summary.get("extracted", 0)
+    ds.extraction = {k: v for k, v in summary.items() if k != "samples"}
     print()
     print(f"Извлечение в {dest}:")
     print(f"  файлов: {summary.get('extracted', 0)}  пропущено: {summary.get('skipped', 0)}"
@@ -184,6 +212,19 @@ def _exit_code(ds) -> int:
     if by["warn"]:
         return 1
     return 0
+
+
+def _print_doctor(rep: dict) -> None:
+    m = rep["media"]["counts"]
+    print()
+    print(f"DOCTOR // здоровье {rep['score']}/100 — {rep['verdict']}")
+    print(f"  медиа проверено: {human_int(rep['media']['checked'])}"
+          f" · битых картинок: {m['bad_images']} · битых звуков: {m['bad_audio']}"
+          f" · пустых: {m['empty']}")
+    if rep["pngs"]:
+        print(f"  аномальных PNG: {len(rep['pngs'])}")
+    if rep["containers"]["counts"]["empty"]:
+        print(f"  контейнеров без содержимого: {rep['containers']['counts']['empty']}")
 
 
 # ---------------------------------------------------------------------------

@@ -161,7 +161,44 @@ class RenPyPlugin(EnginePlugin):
                 out["samples"].append(f"! {container}: {exc}")
         if out["extracted"]:
             out["message"] = f"RPA: извлечено {out['extracted']} файлов."
+
+        # --- декомпиляция .rpyc ---
+        dec = {"extracted": 0, "errors": 0, "samples": [], "message": ""}
+        if only_kinds is None or "script" in only_kinds:
+            dec = self._decompile_scripts(dataset, Path(dest), ctx)
+        if dec.get("message"):
+            out["message"] += " " + dec["message"]
+        out["extracted"] += dec.get("extracted", 0)
+        out["errors"] += dec.get("errors", 0)
+        out["samples"] += dec.get("samples", [])
         return merge_summaries(base, out)
+
+    # ------------------------------------------------------------------
+    def _decompile_scripts(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
+        from ...core import rpyc as rpyc_mod
+        out = {"extracted": 0, "errors": 0, "samples": [], "message": ""}
+        full = ctx.keys.get("rpyc_full", "1") != "0"
+        for a in dataset.assets:
+            if a.container or not a.path.lower().endswith((".rpyc", ".rpymc")):
+                continue
+            src = dataset.root / a.path
+            if not src.is_file():
+                continue
+            target = dest / "decompiled" / (safe_rel(a.path) + (".rpy" if full else ".strings.txt"))
+            try:
+                info = rpyc_mod.decompile_file(src, target, full=full)
+                out["extracted"] += 1
+                if len(out["samples"]) < 10:
+                    out["samples"].append(f"{a.path} → метки {info['labels']}, "
+                                          f"экраны {info['screens']}, реплики {info['dialogue']}")
+            except (OSError, rpyc_mod.RpycError) as exc:
+                out["errors"] += 1
+                if len(out["samples"]) < 10:
+                    out["samples"].append(f"! {a.path}: {exc}")
+        if out["extracted"] or out["errors"]:
+            out["message"] = (f"RPYC: декомпилировано {out['extracted']} скриптов"
+                              + (f", ошибок {out['errors']}" if out["errors"] else "") + ".")
+        return out
 
 
 def _parse_rpa3_index(raw: bytes, key: int, rpa32: bool) -> list[tuple[str, int, int]]:

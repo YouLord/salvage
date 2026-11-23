@@ -2,14 +2,14 @@
 
 **Аудит и восстановление ассетов игр. Не только Unity.**
 
-`salvage` — открытый инструмент в духе [AssetRipper](https://github.com/AssetRipper/AssetRipper), но построенный как
+`salvage` — открытый инструмент в духе [AssetRipper](https://github.com/AssetRipper/AssetRipper), построенный как
 **мультидвижковое ядро с плагинами**: Unity, Godot, GameMaker Studio, RPG Maker (MV/MZ/XP/VX/Ace), Ren'Py
-и универсальный режим для всего остального.
+и универсальный слой (Unreal `.pak`, FMOD FSB, Wwise, zip, неизвестные сборки).
 
 Две задачи, которые решает инструмент:
 
 1. **Аудит** — что лежит в сборке, что сломано, что зашифровано, где дубликаты и утечки конфигов.
-2. **Восстановление** — извлечение ассетов в обычные форматы и распаковка контейнеров.
+2. **Восстановление** — извлечение ассетов в обычные форматы, распаковка контейнеров, декомпиляция, конвертация данных.
 
 ---
 
@@ -19,6 +19,7 @@
 cd salvage
 pip install -e .                 # ядро и все движки, кроме глубокого Unity
 pip install -e ".[unity]"        # + UnityPy для глубокого разбора Unity-бандлов
+pip install pillow               # опционально: нарезка кадров спрайтов GameMaker
 ```
 
 Python ≥ 3.10, без обязательных нативных зависимостей.
@@ -28,9 +29,18 @@ Python ≥ 3.10, без обязательных нативных зависим
 ```bash
 salvage engines                                # список плагинов
 salvage detect /path/to/game                   # кто это?
-salvage scan /path/to/game --deep              # аудит → salvage-report/report.html
+salvage audit /path/to/game                    # скан + doctor + отчёты
+salvage scan /path/to/game --deep --doctor     # только аудит
 salvage extract /path/to/game --out ./unpacked # извлечение ассетов
-salvage audit /path/to/game                    # скан + отчёты одной командой
+```
+
+Ключевые опции извлечения:
+
+```bash
+salvage extract game/ --texture-format qoi     # текстуры GameMaker: png | qoi | bz2 | both
+salvage extract game/ --rm-key @www/data/System.json   # ключ MV/MZ из System.json
+salvage extract game/ --no-data-json           # не конвертировать rxdata/rvdata2
+salvage extract game/ --rpyc-strings           # .rpyc: только строки, без склейки .rpy
 ```
 
 Веб-пульт (локально, без отправки данных наружу):
@@ -45,15 +55,33 @@ python -m salvage.web --port 8741
 
 | Движок | Детект | Аудит | Извлечение | Статус |
 |---|---|---|---|---|
-| **Unity** | `globalgamemanagers`, `*_Data/`, магия `UnityFS` | индекс, deep-разбор через UnityPy, внешние ссылки | побайтово + Texture2D/TextAsset/AudioClip/Mesh через UnityPy | работает; без UnityPy — только индекс |
-| **Godot** | `GDPC`, `project.godot`, `.tscn/.tres` | PCK v1/v2 (+встроенный в exe), зависимости `res://`, битые ссылки | распаковка PCK по смещениям | работает; зашифрованные PCK честно помечаются |
-| **GameMaker** | `FORM/DATA`, `data.win`, `.yy/.yyp` | карта чанков, целостность, ресурсы проекта | побайтово | работает; байткод GML не декомпилируется (roadmap) |
+| **Unity** | `globalgamemanagers`, `*_Data/`, магия `UnityFS` | индекс, deep-разбор через UnityPy, внешние ссылки | побайтово + Texture2D/TextAsset/AudioClip/Mesh | работает; без UnityPy — только индекс |
+| **Godot** | `GDPC`, `project.godot`, `.tscn/.tres` | PCK v1/v2 (+встроенный в exe), зависимости `res://`, битые ссылки | распаковка PCK по смещениям | работает; зашифрованные PCK помечаются |
+| **GameMaker** | `FORM/DATA`, `data.win`, `.yy/.yyp` | карта чанков, SPRT/TPAG/TXTR, SOND/AUDO, STRG, целостность | **спрайты (кадры+rect), текстуры PNG/QOI/BZ2, аудио из `AUDO` и `audiogroup*.dat`, `manifest.json`, `strings.txt`** | работает; GML-байткод не декомпилируется (roadmap) |
 | **RPG Maker MV/MZ** | магия `RPGMV/RPGMZ`, `.rpgmvp/.png_`, `System.json` | ключ, карты, события, шифрование | **расшифровка** PNG/OGG/M4A | работает полностью |
-| **RPG Maker XP/VX/Ace** | `RGSSAD` | версия архива | пока копирование архива целиком | roadmap |
-| **Ren'Py** | `RPA-3.x`, `.rpyc` | карта архива, индекс скриптов | извлечение из RPA | работает; `.rpyc` не декомпилируется (UnRen — внешний шаг) |
-| **generic** | — | полный индекс, энтропия, улики движка, zip-распаковка | копирование + zip | работает |
+| **RPG Maker XP/VX/Ace** | `RGSSAD` v1/v2/v3 | индекс архива, данные `.rxdata/.rvdata2` | **расшифровка RGSSAD v1/v3** + **конвертация данных в JSON** | работает |
+| **Ren'Py** | `RPA-3.x`, `.rpyc` | карта архива, структура скриптов | **распаковка RPA**, **декомпиляция `.rpyc`** (RPC2 и старый формат) в приближённый `.rpy` | работает; полная побайтовая реконструкция — roadmap |
+| **Unreal (generic)** | `.pak`, улики `Engine/` | **индекс `.pak` v1–v11**, точка монтирования, сжатие, AES-пометки | **распаковка zlib-блоков** | работает; Oodle/LZ4 и шифрованные — помечаются (roadmap) |
+| **FMOD (generic)** | `FSB5`, `FSB4` | индексирование сэмплов, кодеки, частоты | извлечение сэмплов (Vorbis — в «сырой» контейнер) | работает |
+| **Wwise (generic)** | `AKPK` | индексирование `.pck` | декодер банков — roadmap | индексируется |
+| **generic** | — | полный индекс, энтропия, улики движка, zip | копирование + zip | работает |
 
-Общие анализаторы (для любого движка):
+### Doctor Mode (врачебный аудит)
+
+```bash
+salvage audit game/            # doctor включён по умолчанию
+salvage scan game/ --doctor    # только скан + doctor
+```
+
+Считает «здоровье» проекта 0–100 и проверяет:
+
+- битые заголовки изображений и аудио, пустые файлы;
+- PNG с нулевыми/огромными размерами (частая порча при моддинге);
+- контейнеры без прочитанного содержимого;
+- битые ссылки, дубликаты, зашифрованные блоки;
+- инвентарь чувствительных строк (отдельно от doctor, в отчёте).
+
+### Общие анализаторы
 
 - дубликаты по `sha256` и «сколько занимают лишние копии»;
 - **битые ссылки**: зависимости контейнеров/сцен → отсутствующие файлы;
@@ -63,9 +91,11 @@ python -m salvage.web --port 8741
 
 ## Форматы отчётов
 
-- `report.html` — автономный (без внешних ресурсов), стиль «терминальный пульт»;
-- `scan.json` — машиночитаемый полный дамп (`totals`, `assets`, `findings`, `meta`);
-- `report.md` — для PR/issue.
+- `report.html` — автономный (без внешних ресурсов), терминальный стиль;
+- `scan.json` — машиночитаемый полный дамп (`totals`, `assets`, `findings`, `meta`, `extraction`);
+- `report.md` — для PR/issue;
+- `manifest.json` (GameMaker) — все извлечённые ресурсы + объекты/комнаты/скрипты/шейдеры/шрифты;
+- `strings.txt` (GameMaker) — все строки игры.
 
 ## Коды возврата CLI (для CI)
 
@@ -76,66 +106,62 @@ python -m salvage.web --port 8741
 | 2 | есть ошибки |
 | 3 | сбой выполнения |
 
-Пример для CI: `salvage scan build/ —deep --formats json || exit $?`.
-
 ## Архитектура
 
 ```
 salvage/
 ├── core/
-│   ├── model.py        # Asset, Finding, Dataset — единая модель
-│   ├── plugin_base.py  # контракт EnginePlugin (detect/scan/extract)
-│   ├── registry.py     # реестр движков, автодетект
-│   ├── scan.py         # оркестратор скана
-│   ├── analyze.py      # дубликаты, ссылки, энтропия, секреты
-│   └── util.py         # классификация, магия, sha256, safe_rel
+│   ├── model.py         # Asset, Finding, Dataset
+│   ├── plugin_base.py   # контракт EnginePlugin (detect/scan/extract)
+│   ├── registry.py      # реестр движков, автодетект
+│   ├── scan.py          # оркестратор скана
+│   ├── analyze.py       # дубликаты, ссылки, энтропия, секреты
+│   ├── doctor.py        # врачeбный отчёт
+│   ├── imaging.py       # QOI/PNG кодеки + BZ2 (без зависимостей)
+│   ├── ruby_marshal.py  # Ruby Marshal 4.8 → JSON и обратно
+│   ├── rpyc.py          # разбор/декомпиляция Ren'Py .rpyc
+│   └── util.py          # классификация, магия, sha256, safe_rel
 ├── plugins/
 │   ├── unity/  godot/  gamemaker/  rpgmaker/  renpy/  generic/
-├── report/             # html / json / md
-├── web.py              # локальный пульт (http.server, без зависимостей)
-└── cli.py              # argparse-интерфейс
+│   │   └── generic/: unreal_pak.py, fmod_fsb.py
+├── report/              # html / json / md
+├── web.py               # локальный пульт (http.server)
+└── cli.py               # argparse-интерфейс
 ```
 
-Плагин обязан реализовать `slug`, `display_name`, `detect(root) -> (score, evidence)` и `scan(root, ctx)`;
-`extract(...)` — опционально. Ядро не знает ни одного имени движка: всё через реестр.
+Плагин обязан реализовать `slug`, `display_name`, `detect()`, `scan()`; `extract()` — опционально.
+Ядро не знает ни одного имени движка: всё через реестр.
 
 ### Новый движок за 60 строк
 
 ```python
 # salvage/plugins/mygame/plugin.py
-from ...core.model import Dataset
-from ...core.plugin_base import EngineContext, EnginePlugin
-
 class MyGamePlugin(EnginePlugin):
     slug, display_name, can_extract = "mygame", "MyGame Engine", True
 
     def detect(self, root):
-        return (0.9, ["найден .mygame-архив"]) if (root / "data.mygame").exists() else (0.0, [])
+        return (0.9, ["найден .mygame"]) if (root / "data.mygame").exists() else (0.0, [])
 
-    def scan(self, root, ctx: EngineContext) -> Dataset:
+    def scan(self, root, ctx):
         ds = Dataset(self.slug, self.display_name, root)
         ds.add_asset("data.mygame", "archive", (root / "data.mygame").stat().st_size)
-        for ref in ...:
-            ds.add_dep("data.mygame", ref)   # ядро само найдёт битые ссылки
         return ds
 ```
 
-Зарегистрируйте класс в `core/registry.py::build_registry()`. Отчёты, дубликаты, секреты и CLI
-подхватят его автоматически.
+Зарегистрируйте класс в `core/registry.py::build_registry()` — отчёты, doctor, дубликаты,
+секреты и CLI подхватят его автоматически.
 
 ## Происхождение идей и лицензия
 
-- Вдохновение архитектурой **[AssetRipper](https://github.com/AssetRipper/AssetRipper)** (C#, **GPL-3.0**):
-  слоистость «модель ассетов → экспорт-модули → сборка проекта», идея primary content extraction.
-  **Код AssetRipper не копировался и не включается** — GPL-3.0 это копилефт, а `salvage` распространяется
-  под MIT и задуман как библиотека/CLI для любого проекта.
-- Глубокий Unity-разбор — через **[UnityPy](https://github.com/K0lb3/UnityPy)** (MIT, зависимость по желанию).
-- GameMaker-формат описан сообществом (Underanalyzer/UndertaleModTool); код парсера — оригинальный.
-
-`salvage` — MIT. Используйте только на своих или явно разрешённых сборках; извлечение чужих
-ассетов регулируется авторским правом.
+- Вдохновение архитектурой **[AssetRipper](https://github.com/AssetRipper/AssetRipper)** (GPL-3.0),
+  [gm-extract](https://github.com/nazarhktwitch/gm-extract) и [UndertaleModTool](https://github.com/UndertaleModTool)
+  (идеи по чанкам GameMaker), [unrpyc](https://github.com/CensoredUsername/unrpyc) (подход к RPYC),
+  [u4pak](https://github.com/panzi/rust-u4pak) (layout `.pak`). **Код этих проектов не копировался**;
+  реализации написаны с нуля по спецификациям форматов.
+- Глубокий Unity-разбор — через **[UnityPy](https://github.com/K0lb3/UnityPy)** (MIT, по желанию).
+- `salvage` — MIT. Используйте только на своих или явно разрешённых сборках.
 
 ## Roadmap
 
-См. **[ROADMAP.md](ROADMAP.md)** — приоритеты, известные ограничения и идеи (декомпиляция GML,
-`.rpyc`, RGSS, Unreal `.pak/.utoc`, Cocos/Laya, инкрементальные сканы, SARIF-вывод для CI).
+См. **[ROADMAP.md](ROADMAP.md)** — декомпилятор GML, `.utoc/.ucas` и Oodle, Wwise-банки,
+RGSS v2, полный декомпилятор Ren'Py, SARIF для CI.

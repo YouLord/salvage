@@ -47,9 +47,9 @@ def scan(root: Path, engine: str | None = None, ctx: EngineContext | None = None
     ds.score = score
     ds.meta.setdefault("detection_evidence", evidence)
 
-    # общий обход: файлы, которые плагин не учёл сам, добавляем как обычные ассеты
-    if plugin.slug == "generic" or not ds.assets:
-        _index_plain_files(root, ds, ctx)
+    # общий обход: добавляем файлы, которые плагин не учёл сам
+    # (нужно и generic-режиму, и доктору: медиа на диске должны быть в индексе)
+    _index_plain_files(root, ds, ctx)
 
     run_analyzers(ds, ctx)
     ctx.say(f"Проиндексировано: {human_int(ds.total_files)} ассетов, "

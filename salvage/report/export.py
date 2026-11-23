@@ -61,6 +61,25 @@ def render_markdown(ds: Dataset) -> str:
             detail = (f.detail or "").replace("\n", " ")[:180]
             a(f"| {f.severity} | `{f.code}` | {f.title} | {detail} |")
         a("")
+    doctor = ds.meta.get("doctor")
+    if doctor:
+        m = doctor["media"]["counts"]
+        a("## Врачебный отчёт (doctor)")
+        a("")
+        a(f"**Здоровье: {doctor['score']}/100 — {doctor['verdict']}**")
+        a("")
+        a(f"- проверено медиа: {human_int(doctor['media']['checked'])}")
+        a(f"- битые изображения: {m['bad_images']} · аудио: {m['bad_audio']} · пустые: {m['empty']}")
+        a(f"- аномальные PNG: {len(doctor['pngs'])}")
+        a(f"- контейнеры без содержимого: {doctor['containers']['counts']['empty']}")
+        a("")
+    if ds.extraction:
+        a("## Извлечение")
+        a("")
+        for k in ("extracted", "skipped", "errors", "message"):
+            if k in ds.extraction:
+                a(f"- {k}: {ds.extraction[k]}")
+        a("")
     if ds.meta.get("biggest"):
         a("## Самые крупные файлы")
         a("")

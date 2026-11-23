@@ -109,6 +109,8 @@ def index_page(default_path: str = "") -> str:
 def result_page(path: Path, engine: str, deep: bool) -> str:
     with _RUNNING:
         ds, plugin = scan(path, engine or None, EngineContext(deep=deep, log=lambda m: None))
+        from .core.doctor import run_doctor
+        doctor = run_doctor(ds)
     summary = ds.to_dict(asset_limit=500)
     by = ds.findings_by_severity()
     errs, warns = len(by["error"]), len(by["warn"])
@@ -148,6 +150,17 @@ def result_page(path: Path, engine: str, deep: bool) -> str:
   <div class='cell'><div class='v'>{warns}</div><div class='l'>предупреждений</div></div>
   <div class='cell'><div class='v'>{len(ds.deps)}</div><div class='l'>зависимостей</div></div>
 </div>
+<section><h2>врачебный отчёт</h2><div class='body'>
+<div style='font-size:19px;color:{"var(--ok)" if doctor["score"] >= 90 else "var(--info)" if doctor["score"] >= 75 else "var(--warn)" if doctor["score"] >= 50 else "var(--err)"}'>
+здоровье: {doctor["score"]}/100 — {_html.escape(doctor["verdict"])}</div>
+<table style='margin-top:8px'>
+<tr><td class='dim'>проверено медиа</td><td class='num'>{human_int(doctor["media"]["checked"])}</td></tr>
+<tr><td class='dim'>битые изображения</td><td class='num'>{doctor["media"]["counts"]["bad_images"]}</td></tr>
+<tr><td class='dim'>битые аудио</td><td class='num'>{doctor["media"]["counts"]["bad_audio"]}</td></tr>
+<tr><td class='dim'>пустые файлы</td><td class='num'>{doctor["media"]["counts"]["empty"]}</td></tr>
+<tr><td class='dim'>аномальные PNG</td><td class='num'>{len(doctor["pngs"])}</td></tr>
+<tr><td class='dim'>контейнеры без содержимого</td><td class='num'>{doctor["containers"]["counts"]["empty"]}</td></tr>
+</table></div></section>
 <section><h2>профиль контента</h2><div class='body'><table>
 <tr><th>тип</th><th>файлов</th><th>размер</th><th>доля</th></tr>{kind_rows}</table></div></section>
 <section><h2>находки</h2><div class='body'><table>

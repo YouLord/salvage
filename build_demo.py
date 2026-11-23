@@ -25,9 +25,12 @@ DEMO = ROOT / "demo"
 ENGINES = [
     ("unity", "Unity-сборка: индекс, deep-разбор, секреты"),
     ("godot", "Godot: PCK v2, .tscn-зависимости"),
-    ("gm", "GameMaker: карта чанков data.win"),
+    ("gm", "GameMaker: спрайты/TPAG, текстуры PNG+QOI+BZ2, аудиогруппы, manifest"),
     ("rm_mv", "RPG Maker MV: расшифровка .rpgmvp/.rpgmvo"),
-    ("renpy", "Ren'Py: RPA-3.0 архив"),
+    ("rm_xp", "RPG Maker XP/VX/Ace: RGSSAD v1/v3 + данные в JSON"),
+    ("renpy", "Ren'Py: RPA-3.0 + декомпиляция RPYC"),
+    ("ue", "Unreal: распаковка .pak (zlib-блоки)"),
+    ("fmod", "FMOD: FSB5-банк со сэмплами"),
 ]
 
 
@@ -43,7 +46,15 @@ def main() -> None:
     rows = []
     for slug, note in ENGINES:
         path = FIX / slug
-        ds, plugin = scan(path, None, EngineContext(deep=True, log=lambda m: None))
+        ctx = EngineContext(deep=True, log=lambda m: None)
+        ds, plugin = scan(path, None, ctx)
+        import tempfile
+        extracted = Path(tempfile.mkdtemp(prefix=f"salvage-demo-{slug}-"))
+        summary = plugin.extract(ds, extracted, ctx)
+        ds.extracted_count = summary.get("extracted", 0)
+        ds.extraction = {k: v for k, v in summary.items() if k != "samples"}
+        from salvage.core.doctor import run_doctor
+        ds.meta["doctor"] = run_doctor(ds)
         out = DEMO / slug
         write_html(ds, out / "report.html")
         write_json(ds, out / "scan.json")

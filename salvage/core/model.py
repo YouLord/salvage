@@ -76,6 +76,8 @@ class Dataset:
     deps: list[tuple[str, str]] = field(default_factory=list)  # (источник, ссылка)
     meta: dict[str, Any] = field(default_factory=dict)
     scan_errors: list[str] = field(default_factory=list)
+    extracted_count: int = 0          # сколько файлов реально извлечено в extract
+    extraction: dict[str, Any] = field(default_factory=dict)
 
     # --- наполнение ---------------------------------------------------
     def add_asset(
@@ -149,6 +151,8 @@ class Dataset:
             "assets_truncated": max(0, len(self.assets) - asset_limit),
             "findings": [f.to_dict() for f in self.sorted_findings()],
             "dependencies_total": len(self.deps),
+            "extracted_count": self.extracted_count,
+            "extraction": _jsonable(self.extraction),
             "scan_errors": self.scan_errors,
         }
 
@@ -161,6 +165,10 @@ def _kind_key(kind: str) -> tuple[int, str]:
 
 
 def _jsonable(value: Any) -> Any:
+    if hasattr(value, "entries") and hasattr(value, "version"):  # PakFile и подобные
+        return {"__object__": type(value).__name__,
+                "version": getattr(value, "version", None),
+                "entries": len(getattr(value, "entries", []) or [])}
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):

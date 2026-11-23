@@ -101,9 +101,44 @@ def render_html(ds: Dataset) -> str:
         (human_int(len(ds.deps)), "зависимостей"),
         (human_int(errors + warns), "проблем"),
     ]
+    if ds.extracted_count:
+        cells.append((human_int(ds.extracted_count), "извлечено файлов"))
     for v, l in cells:
         p(f"<div class='cell'><div class='v'>{v}</div><div class='l'>{l}</div></div>")
     p("</div>")
+
+    # --- doctor ---
+    doctor = ds.meta.get("doctor")
+    if doctor:
+        m = doctor["media"]["counts"]
+        score = doctor["score"]
+        color = ("var(--ok)" if score >= 90 else "var(--info)" if score >= 75
+                 else "var(--warn)" if score >= 50 else "var(--err)")
+        p("<section><h2>Врачебный отчёт (doctor)</h2><div class='body'>")
+        p(f"<div style='font-size:20px;color:{color}'>здоровье: {score}/100 — "
+          f"{_esc(doctor['verdict'])}</div>")
+        p("<table style='margin-top:8px'>")
+        rows = [
+            ("проверено медиа", human_int(doctor["media"]["checked"])),
+            ("битые изображения", human_int(m["bad_images"])),
+            ("битые аудио", human_int(m["bad_audio"])),
+            ("пустые файлы", human_int(m["empty"])),
+            ("аномальные PNG", human_int(len(doctor["pngs"]))),
+            ("контейнеры без содержимого", human_int(doctor["containers"]["counts"]["empty"])),
+        ]
+        for label, val in rows:
+            p(f"<tr><td class='dim'>{label}</td><td class='num'>{val}</td></tr>")
+        p("</table></div></section>")
+
+    # --- извлечение ---
+    if ds.extraction:
+        exc = ds.extraction
+        p("<section><h2>Извлечение</h2><div class='body'><table>")
+        p("<tr><th>метрика</th><th>значение</th></tr>")
+        for k in ("extracted", "skipped", "errors", "message"):
+            if k in exc:
+                p(f"<tr><td class='dim'>{_esc(k)}</td><td>{_esc(exc[k])}</td></tr>")
+        p("</table></div></section>")
 
     # --- типы ---
     p("<section><h2>Профиль контента</h2><div class='body'><table>")
@@ -180,7 +215,8 @@ def render_html(ds: Dataset) -> str:
                               "secrets", "containers", "detection_evidence", "_rm_key")}
     if meta_view:
         p("<section><h2>Метаданные движка</h2><div class='body'>")
-        p(f"<pre>{_esc(json.dumps(meta_view, ensure_ascii=False, indent=1)[:12000])}</pre>")
+        from ..core.model import _jsonable
+        p(f"<pre>{_esc(json.dumps(_jsonable(meta_view), ensure_ascii=False, indent=1)[:12000])}</pre>")
         p("</div></section>")
 
     # --- секреты ---
