@@ -98,8 +98,9 @@ class TestFixtures(unittest.TestCase):
         self.assertEqual(len(entries), 3)
         out = self.tmp / "renpy"
         summary = plugin.extract(ds, out, EngineContext(log=lambda m: None))
-        # 3 файла из RPA + 2 файла игры (script.rpyc, сам архив)
-        self.assertEqual(summary["extracted"], 5)
+        # 3 файла из RPA + script.rpyc; сам .rpa не дублируется (skip_kinds)
+        self.assertEqual(summary["extracted"], 4)
+        self.assertFalse(list((out / "files").rglob("*.rpa")), "архив не должен копироваться дважды")
         names = {p.name for p in (out / "rpa").rglob("*") if p.is_file()}
         self.assertIn("bg room.png", names)
         self.assertIn("theme.ogg", names)
