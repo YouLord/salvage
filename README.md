@@ -52,6 +52,21 @@ python -m salvage.web --port 8741
 
 Демо-отчёты по синтетическому стенду всех движков: `demo/index.html` (собирается `python build_demo.py`).
 
+## Тесты
+
+Фикстуры в git не лежат — они собираются детерминированно из кода:
+
+```bash
+python tests/make_fixtures.py            # стенды всех движков
+python tests/make_fixtures.py regress    # минимальные регресс-фикстуры (по одной на баг)
+python tests/make_asset_tone.py          # real ogg для сквозного теста FMOD→Ogg
+python -W ignore -m unittest discover -s tests
+```
+
+114 тестов. Опциональные зависимости учитываются аккуратно: без `lz4` тест
+проверяет статус `unsupported:lz4-python-missing`, без `soundfile` PCM-сверка
+пропускается (`skipUnless`), а не выдаётся за пройденную.
+
 ## Что умеет по движкам
 
 | Движок | Детект | Аудит | Извлечение | Статус |
@@ -60,11 +75,11 @@ python -m salvage.web --port 8741
 | **Godot** | `GDPC`, `project.godot`, `.tscn/.tres` | PCK v1/v2 (+встроенный в exe), зависимости `res://`, битые ссылки | распаковка PCK по смещениям | работает; зашифрованные PCK помечаются |
 | **GameMaker** | `FORM/DATA`, `data.win`, `.yy/.yyp` | карта чанков, SPRT/TPAG/TXTR, SOND/AUDO, STRG, целостность | **спрайты (кадры+rect), текстуры PNG/QOI/BZ2, аудио из `AUDO` и `audiogroup*.dat`, `manifest.json`, `strings.txt`** | работает; GML-байткод не декомпилируется (roadmap) |
 | **RPG Maker MV/MZ** | магия `RPGMV/RPGMZ`, `.rpgmvp/.png_`, `System.json` | ключ, карты, события, шифрование | **расшифровка** PNG/OGG/M4A | работает полностью |
-| **RPG Maker XP/VX/Ace** | `RGSSAD` v1/v2/v3 | индекс архива, данные `.rxdata/.rvdata2` | **расшифровка RGSSAD v1/v3** + **конвертация данных в JSON** | работает |
+| **RPG Maker XP/VX/Ace** | `RGSSAD` v1/v2/v3 | индекс архива, данные `.rxdata/.rvdata2` | **расшифровка RGSSAD v1/v3** + **конвертация данных в JSON** | работает; `.rgss2a` = версия 1 (формата v2 нет), байт 2 помечается как патч |
 | **Ren'Py** | `RPA-3.x`, `.rpyc` | карта архива, структура скриптов | **распаковка RPA**, **декомпиляция `.rpyc`** (RPC2 и старый формат) в приближённый `.rpy` | работает; полная побайтовая реконструкция — roadmap |
-| **Unreal (generic)** | `.pak`, улики `Engine/` | **индекс `.pak` v1–v11**, точка монтирования, сжатие, AES-пометки | **распаковка zlib-блоков** | работает; Oodle/LZ4 и шифрованные — помечаются (roadmap) |
-| **FMOD (generic)** | `FSB5`, `FSB4` | индексирование сэмплов, кодеки, частоты | извлечение сэмплов (Vorbis — в «сырой» контейнер) | работает |
-| **Wwise (generic)** | `AKPK` | индексирование `.pck` | декодер банков — roadmap | индексируется |
+| **Unreal (generic)** | `.pak`, улики `Engine/` | **индекс `.pak` v1–v11**, точка монтирования, сжатие, AES-пометки | **распаковка zlib и LZ4 (свой raw-block декодер)**, v10+ FDI | работает; Oodle и шифрованные — помечаются (`compression:oodle`, `encrypted`) |
+| **FMOD (generic)** | `FSB5`, `FSB4` | индексирование сэмплов, кодеки, частоты | извлечение сэмплов; **Vorbis собирается в настоящий `.ogg`** (страницы + CRC32) | работает; если setup недостижим — честный `headers-unrecoverable` |
+| **Wwise (generic)** | `AKPK`, `BKHD` | `.pck` (v1/v2: языки/банки/стримы), `.bnk` по чанкам, HIRC-инвентарь | **`.wem` байт-в-байт** | работает; WEM→Ogg для `vorbis-wwise` не делаем (помечается) |
 | **generic** | — | полный индекс, энтропия, улики движка, zip | копирование + zip | работает |
 
 ### Doctor Mode (врачебный аудит)
