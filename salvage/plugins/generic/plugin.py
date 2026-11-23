@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import struct
 import zipfile
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from ...core.plugin_base import EngineContext, EnginePlugin
 from ...core.util import (classify, head_bytes, human_bytes, human_int, iter_files,
                           rel_posix, safe_rel, sha256_file, sniff_magic)
 from .._shared import copy_verbatim
-from . import fmod_fsb, unreal_pak
+from . import fmod_fsb, unreal_pak, wwise
 
 ENGINE_CLUES = {
     "unity": ("UnityPlayer.dll", "globalgamemanagers", "Managed/", "UnityEngine"),
@@ -44,6 +45,7 @@ class GenericPlugin(EnginePlugin):
         paks: list[Path] = []
         banks: list[Path] = []
         akpks: list[Path] = []
+        bnk_wwise: list[Path] = []
         checked = 0
         for p in iter_files(root, exclude=ctx.exclude):
             if checked > 200_000:
@@ -65,6 +67,8 @@ class GenericPlugin(EnginePlugin):
                     banks.append(p)
             elif ext == ".pck" and head_bytes(p, 4) == b"AKPK":
                 akpks.append(p)
+            elif ext == ".bnk" and head_bytes(p, 4) == b"BKHD":
+                bnk_wwise.append(p)
 
         if clues:
             ds.meta["engine_clues"] = clues
@@ -78,14 +82,81 @@ class GenericPlugin(EnginePlugin):
             self._scan_paks(ds, paks, ctx)
         if banks:
             self._scan_banks(ds, banks)
-        if akpks:
-            ds.meta["wwise_pck"] = [rel_posix(p, root.resolve()) for p in akpks[:200]]
-            ds.add_finding(
-                "info", "wwise_pck",
-                f"Wwise-контейнеров (.pck/AKPK): {len(akpks)}",
-                "Индексированы; содержимое Wwise-банков требует отдельного декодера "
-                "(BKHD/DIDX/HIRC) — в roadmap.")
+        if akpks or bnk_wwise:
+            self._scan_wwise(ds, akpks, bnk_wwise)
         return ds
+
+    # ------------------------------------------------------------------
+    def _scan_wwise(self, ds: Dataset, pcks: list[Path], banks: list[Path]) -> None:
+        """AKPK-пакеты и BKHD-банки: записи .wem с честной классификацией."""
+        found: list[dict] = []
+        totals = {"pck": 0, "bnk": 0, "wem": 0}
+        for p in pcks[:200]:
+            rel = rel_posix(p, ds.root)
+            try:
+                pck = wwise.read_pck(p)
+            except (wwise.WwiseError, OSError, struct.error) as exc:
+                ds.add_finding("warn", "wwise_pck_unreadable",
+                               f"{rel}: .pck не прочитан — {exc}", path=rel)
+                continue
+            totals["pck"] += 1
+            ds.meta.setdefault("wwise_pcks", []).append({
+                "file": rel, "version": pck.version, "entries": len(pck.entries),
+                "languages": pck.languages,
+            })
+            ds.add_finding("info", "wwise_pck",
+                           f"{rel}: Wwise .pck v{pck.version}, медиа {len(pck.entries)}",
+                           "Экспорт .wem выполняется при extract; Vorbis-версии Wwise "
+                           "не являются стандартным Ogg — статус пишется в отчёт.", path=rel)
+            for e in pck.entries:
+                found.append(self._wwise_asset(ds, rel, p, e, totals))
+        for p in banks[:200]:
+            rel = rel_posix(p, ds.root)
+            try:
+                bnk = wwise.read_bnk(p)
+            except (wwise.WwiseError, OSError, struct.error) as exc:
+                ds.add_finding("warn", "wwise_bnk_unreadable",
+                               f"{rel}: .bnk не прочитан — {exc}", path=rel)
+                continue
+            totals["bnk"] += 1
+            ds.meta.setdefault("wwise_banks", []).append({
+                "file": rel, "version": bnk.version, "entries": len(bnk.entries),
+                "chunks": [c[0] for c in bnk.chunks],
+            })
+            ds.add_finding("info", "wwise_bnk",
+                           f"{rel}: Wwise .bnk v{bnk.version}, медиа {len(bnk.entries)}",
+                           "DIDX/DATA разобраны; HIRC (граф событий) — отдельная задача.", path=rel)
+            for e in bnk.entries:
+                found.append(self._wwise_asset(ds, rel, p, e, totals))
+        if totals["wem"]:
+            ds.meta["wwise_wems"] = {"count": totals["wem"],
+                                     "pcks": totals["pck"], "banks": totals["bnk"]}
+        if found:
+            statuses: dict[str, int] = {}
+            for item in found:
+                statuses[item["status"]] = statuses.get(item["status"], 0) + 1
+            ds.meta["wwise_wem_status"] = statuses
+            if statuses.get("unknown"):
+                ds.add_finding(
+                    "warn", "wwise_wem_unknown",
+                    f"Wwise: медиа неизвестного кодека — {statuses['unknown']}",
+                    "Они будут экспортированы как .wem со статусом unknown (без маскировки под .ogg).")
+
+    def _wwise_asset(self, ds: Dataset, rel: str, path: Path,
+                     entry: "wwise.WemEntry", totals: dict) -> dict:
+        try:
+            payload = wwise.read_wem_bytes(path, entry)
+        except OSError:
+            payload = b""
+        status = wwise.wem_status(payload) if payload else "missing"
+        ext = wwise.wem_extension(payload) if payload else "wem"
+        totals["wem"] += 1
+        a = ds.add_asset(f"{rel}::wem_{entry.wem_id}.{ext}", kind="audio",
+                         size=entry.size, container=rel,
+                         wwise_id=entry.wem_id, wwise_offset=entry.offset,
+                         wwise_source=entry.source, wwise_status=status)
+        a.extra["wwise_language"] = entry.language
+        return {"status": status, "id": entry.wem_id}
 
     # ------------------------------------------------------------------
     def _scan_paks(self, ds: Dataset, paks: list[Path], ctx: EngineContext) -> None:
@@ -177,6 +248,16 @@ class GenericPlugin(EnginePlugin):
             if bank_stats["message"]:
                 extra_msgs.append(bank_stats["message"])
 
+        # --- Wwise ---
+        if only_kinds is None or "audio" in only_kinds:
+            wwise_stats = self._extract_wwise(dataset, Path(dest), ctx)
+            summary["extracted"] += wwise_stats["extracted"]
+            summary["skipped"] += wwise_stats["skipped"]
+            summary["errors"] += wwise_stats["errors"]
+            summary["samples"] = (summary["samples"] + wwise_stats["samples"])[:20]
+            if wwise_stats["message"]:
+                extra_msgs.append(wwise_stats["message"])
+
         # --- zip ---
         zip_stats = self._extract_zips(dataset, Path(dest), ctx)
         summary["extracted"] += zip_stats["extracted"]
@@ -247,6 +328,36 @@ class GenericPlugin(EnginePlugin):
                     out["samples"].append(f"! {a.path}: {exc}")
         if out["extracted"]:
             out["message"] = f"FMOD: извлечено сэмплов {out['extracted']}."
+        return out
+
+    def _extract_wwise(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
+        out = {"extracted": 0, "skipped": 0, "errors": 0, "samples": [], "message": ""}
+        statuses: dict[str, int] = {}
+        for a in dataset.assets:
+            if "wwise_id" not in a.extra or not a.container:
+                continue
+            src = dataset.root / a.container
+            entry = wwise.WemEntry(wem_id=a.extra["wwise_id"],
+                                   offset=a.extra["wwise_offset"],
+                                   size=a.size, container=a.container)
+            try:
+                payload = wwise.read_wem_bytes(src, entry)
+            except OSError as exc:
+                out["errors"] += 1
+                continue
+            status = wwise.wem_status(payload)
+            statuses[status] = statuses.get(status, 0) + 1
+            ext = wwise.wem_extension(payload)
+            target = dest / "wwise" / Path(a.container).stem / f"wem_{entry.wem_id}.{ext}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload[: ctx.max_asset_bytes])
+            out["extracted"] += 1
+            if len(out["samples"]) < 10:
+                out["samples"].append(f"{target.relative_to(dest)} ({status})")
+        if out["extracted"]:
+            detail = ", ".join(f"{k}×{v}" for k, v in sorted(statuses.items()))
+            out["message"] = f"Wwise: .wem {out['extracted']} ({detail})."
+            dataset.meta["wwise_wem_status"] = statuses
         return out
 
     def _extract_zips(self, dataset: Dataset, dest: Path, ctx: EngineContext) -> dict:
