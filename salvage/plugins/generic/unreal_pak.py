@@ -37,6 +37,19 @@ class PakError(ValueError):
     pass
 
 
+# Legacy ECompressionFlags для pak v1–v7: поле записи — это БИТЫ алгоритма,
+# а не индекс. Для v8+ то же поле — 0-based индекс в массиве имён методов
+# из footer (0 — «нет сжатия»); это сверено на практике (см. ROADMAP).
+LEGACY_METHODS = {
+    0x00: "none",
+    0x01: "zlib",
+    0x02: "gzip",
+    0x04: "custom",     # движок игры подставляет свой кодек, часто Oodle
+    0x10: "bias-memory",
+    0x20: "bias-speed",
+}
+
+
 @dataclass
 class PakEntry:
     name: str
@@ -59,12 +72,11 @@ class PakEntry:
 
     @property
     def compression(self) -> str:
+        """Имя метода (как в footer) или 0xNN, если имя не распознано."""
         if self.method == 0:
             return "none"
-        if self.method == 1:
-            return "zlib"
         if self.compression_name:
-            return self.compression_name.lower()
+            return self.compression_name
         return f"0x{self.method:x}"
 
 
@@ -111,6 +123,45 @@ def _scan_footer(f) -> tuple[int, int]:
     return (size - len(tail) + idx), version
 
 
+def _table_is_zero_based(compression_names: list[str]) -> bool:
+    """Есть ли в таблице явный нулевой слот «None» (тогда имена идут с нуля).
+
+    Это свойство самой таблицы, поэтому решается детерминированно и
+    одинаково для всех записей пака — без догадок по отдельным записям.
+    """
+    return bool(compression_names) and \
+        (compression_names[0] or "").strip().lower() in ("none", "-", "")
+
+
+def method_name(method: int, compression_names: list[str], version: int) -> str:
+    """Каноническое имя метода сжатия (lowercase) или '' если не распознан.
+
+    Две конвенции поля method, обе зафиксированы тестами:
+      * v1–v7 — legacy-биты ECompressionFlags: 0 none, 1 zlib, 2 gzip,
+        4 custom, 0x10 bias-memory, 0x20 bias-speed. Это НЕ индексы.
+      * v8+ — индекс в таблице имён из footer. Основная конвенция 1-based:
+        method=1 → names[0] (в таблице 5 слотов, нулевой слот «нет сжатия»
+        подразумевается). Если же в names[0] явно написано «None»/«-»,
+        таблица нумеруется с нуля: method → names[method].
+    """
+    if method == 0:
+        return "none"
+    if version >= 8:
+        if not compression_names:
+            return ""
+        if _table_is_zero_based(compression_names):
+            if method < len(compression_names):
+                return (compression_names[method] or "").strip().lower()
+            return ""
+        idx = method - 1
+        if 0 <= idx < len(compression_names):
+            return (compression_names[idx] or "").strip().lower()
+        return ""
+    if method in LEGACY_METHODS:
+        return LEGACY_METHODS[method]
+    return ""
+
+
 def read_pak(path: Path) -> PakFile:
     with open(path, "rb") as f:
         magic_off, version = _scan_footer(f)
@@ -147,10 +198,10 @@ def read_pak(path: Path) -> PakFile:
         except zlib.error:
             pass  # индекс может быть несжатым
         mount, entries = _parse_index(index, version)
-        # подтягиваем имена методов сжатия из footer (v8+) к записям
+        # Имя метода: v8+ — 0-based индекс в compression_names (0 = «нет сжатия»,
+        # поэтому именам соответствуют индексы 1..N-1); v1–v7 — legacy-биты.
         for e in entries:
-            if 0 < e.method < len(compression_names):
-                e.compression_name = compression_names[e.method]
+            e.compression_name = method_name(e.method, compression_names, version)
         return PakFile(path=path, version=version, mount_point=mount,
                        entries=entries, encrypted_index=encrypted_index,
                        compression_names=compression_names, footer_offset=magic_off)
@@ -328,37 +379,39 @@ def decode_encoded_entry(buf: bytes, p: int) -> PakEntry:
 # Извлечение
 # ---------------------------------------------------------------------------
 
-def _block_decompress(chunk: bytes, method: int, name: str,
+def _block_decompress(chunk: bytes, name: str,
                       expected: int | None) -> tuple[bytes | None, str]:
-    """Распаковать один блок согласно методу. Возвращает (данные, статус)."""
+    """Распаковать один блок по имени метода. Возвращает (данные, статус).
+
+    Метод уже разрешён (method_name) — здесь никаких догадок по номеру:
+    неизвестный метод обязан стать ошибкой, а не «данными как есть».
+    """
     lowered = (name or "").lower()
-    if method == 1:
+    if lowered == "none":
+        return chunk, "ok"
+    if not lowered:
+        return None, "compression:unknown"
+    if lowered in ("zlib", "gzip"):
         try:
             return zlib.decompress(chunk), "ok"
         except zlib.error as exc:
-            return None, f"error:zlib:{exc}"
+            return None, f"error:{lowered}:{exc}"
     if "lz4" in lowered:
+        from ...core import lz4 as lz4block
         try:
-            import lz4.block  # type: ignore
-        except Exception:
-            return None, "unsupported:lz4-python-missing"
-        try:
-            return lz4.block.decompress(chunk, uncompressed_size=expected or 0), "ok"
-        except Exception as exc:
-            # LZ4-блок в UE может нести собственный заголовок размера
-            try:
-                return lz4.block.decompress(chunk), "ok"
-            except Exception:
-                return None, f"error:lz4:{exc}"
-    if "oodle" in lowered or "kraken" in lowered or "mermaid" in lowered:
-        return None, "unsupported:oodle"
+            return lz4block.decompress_block(chunk, expected or None), "ok"
+        except lz4block.Lz4BlockError as exc:
+            return None, f"error:lz4:{exc}"
+    if any(k in lowered for k in ("oodle", "kraken", "mermaid", "selkie", "leviathan")):
+        # Oodle лицензирован и в чистом Python не декодируется: честный статус
+        return None, "compression:oodle"
     if "zstd" in lowered:
         try:
             import zstandard  # type: ignore
             return zstandard.ZstdDecompressor().decompress(chunk), "ok"
         except Exception:
             return None, "unsupported:zstd-python-missing"
-    return None, f"compression:{method}"
+    return None, f"compression:{lowered or 'unknown'}"
 
 
 def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tuple[bytes | None, str]:
@@ -369,9 +422,11 @@ def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tup
     """
     if e.encrypted:
         return None, "encrypted"
-    name = e.compression_name
-    if not name and 0 < e.method < len(pak.compression_names):
-        name = pak.compression_names[e.method] or ""
+    name = e.compression_name or method_name(e.method, pak.compression_names, pak.version)
+    if e.method != 0 and not name:
+        # имя метода неизвестно: отдавать байты «как есть» нельзя — это тихо
+        # неправильный результат, а не данные.
+        return None, f"compression:0x{e.method:x}"
     base = e.data_offset
     try:
         with open(pak.path, "rb") as f:
@@ -384,7 +439,7 @@ def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tup
                 for start, end in e.blocks:
                     f.seek(start)
                     chunk = f.read(max(0, end - start))
-                    part, status = _block_decompress(chunk, e.method, name,
+                    part, status = _block_decompress(chunk, name,
                                                      _per_block_hint(e, len(e.blocks)))
                     if part is None:
                         return None, status
@@ -410,7 +465,7 @@ def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tup
                     else:
                         chunk = f.read(remaining)
                         remaining = 0
-                    part, status = _block_decompress(chunk, e.method, name, per)
+                    part, status = _block_decompress(chunk, name, per)
                     if part is None:
                         return None, status
                     out += part
@@ -419,7 +474,7 @@ def read_entry_data(pak: PakFile, e: PakEntry, max_bytes: int = 64 << 20) -> tup
             else:
                 f.seek(base)
                 chunk = f.read(min(e.size, max_bytes))
-                part, status = _block_decompress(chunk, e.method, name, e.uncompressed)
+                part, status = _block_decompress(chunk, name, e.uncompressed)
                 if part is None:
                     return None, status
                 out += part

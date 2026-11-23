@@ -148,7 +148,7 @@ class TestPartialExtraction(CliBase):
         self.assertEqual(stats["extracted"], 2)
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(stats["errors"], 1, "отказ Oodle — это ошибка, а не тихий skip")
-        self.assertIn("unsupported:oodle", stats["message"])
+        self.assertIn("compression:oodle", stats["message"])
 
 
 class TestEngineSelection(CliBase):
