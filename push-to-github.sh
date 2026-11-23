@@ -138,13 +138,18 @@ if remote_files="$(git ls-remote --heads "$REPO_URL" "$BRANCH" 2>/dev/null)" && 
      # либо, если это точно ваш черновик и его можно потерять:
      #   git push --force-with-lease origin $BRANCH"
   fi
-  # тянем с --allow-unrelated-histories: у GitHub «Initial commit» не связан с нашим
+  # У GitHub «Initial commit» не связан с нашей историей → --allow-unrelated-histories.
+  # -X ours: конфликтующие файлы (типичный случай — README.md, который GitHub
+  # создал сам) остаются НАШИМИ, а посторонний Initial commit сохраняется в истории.
   say "  сливаю безобидный Initial commit GitHub с нашей историей"
-  if ! run git pull --no-rebase --allow-unrelated-histories --no-edit \
-        -m "merge: сохранить Initial commit GitHub" origin "$BRANCH"; then
+  if ! run git fetch -q origin "$BRANCH"; then
+    die "не удалось получить ветку $BRANCH с GitHub (сеть? права токена?)"
+  fi
+  if ! run git merge --allow-unrelated-histories -X ours --no-edit \
+        -m "merge: сохранить Initial commit GitHub" "origin/$BRANCH"; then
     git merge --abort 2>/dev/null || true
-    die "слияние не удалось. Частый случай — конфликт README.md.
-     Разрешите вручную: git status, поправьте файл, git add, git commit,
+    die "слияние не удалось. Разрешите вручную:
+     git status ; поправьте файл ; git add -A ; git commit
      затем снова запустите этот скрипт."
   fi
   # наш README должен остаться нашим (GitHub писал в него заголовок репозитория)
