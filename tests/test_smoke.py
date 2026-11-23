@@ -227,6 +227,24 @@ class TestFixtures(unittest.TestCase):
                 self.assertIsNotNone(data, name)
                 self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
 
+    def test_rgss_v2_rgss2a(self) -> None:
+        """VX: явная версия 2 (.rgss2a) — та же раскладка, что v1, байт-в-байт."""
+        import hashlib
+        from salvage.plugins.rpgmaker.plugin import parse_rgss_entries, extract_rgss_file
+        path = FIX / "rm_xp" / "Game.rgss2a"
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(8)[7], 2)
+            entries = parse_rgss_entries(f, 2)
+            self.assertEqual(len(entries), 3)
+            expected = json.loads((FIX / "rm_xp" / "expected_rgss_v2.json").read_text("utf-8"))
+            by_name = {e["name"]: e for e in entries}
+            for name, sha in expected.items():
+                self.assertIn(name, by_name)
+                data = extract_rgss_file(f, {"rgss_offset": by_name[name]["offset"],
+                                             "rgss_key": by_name[name]["key"],
+                                             "rgss_size": by_name[name]["size"]})
+                self.assertEqual(hashlib.sha256(data).hexdigest(), sha, name)
+
     def test_ue_pak_byte_exact(self) -> None:
         import hashlib
         dataset = self.reg["generic"].scan(FIX / "ue", EngineContext(deep=False, log=lambda m: None))

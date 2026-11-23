@@ -448,10 +448,27 @@ def decrypt_words(data: bytes, key: int, advance: bool = True) -> bytes:
     return bytes(out)
 
 
+# Версии RGSS-архива:
+#   1 — XP (.rgssad)
+#   2 — «VX» (.rgss2a). Официальный VX пишет версию 1 (тот же формат, что XP),
+#       но встречаются сборки с байтом 2 и той же раскладкой — читаем так же.
+#   3 — VX Ace (.rgss3a): другой заголовок и отдельные ключи на файл.
+RGSS_LAYOUT = {1: "v1", 2: "v1", 3: "v3"}
+
+
 def parse_rgss_entries(f, version: int) -> list[dict] | None:
+    layout = RGSS_LAYOUT.get(version)
+    if layout == "v1":
+        return _parse_rgss_v1(f, version)
+    if layout == "v3":
+        return _parse_rgss_v3(f, version)
+    return None
+
+
+def _parse_rgss_v1(f, version: int) -> list[dict] | None:
     f.seek(8)
     entries: list[dict] = []
-    if version == 1:
+    if True:
         key = 0xDEADCAFE
         while True:
             b = f.read(4)
@@ -475,11 +492,16 @@ def parse_rgss_entries(f, version: int) -> list[dict] | None:
                 break
             offset = f.tell()
             entries.append({"name": name.replace("\\", "/"), "offset": offset,
-                            "size": size, "key": key, "version": 1})
+                            "size": size, "key": key, "version": version})
             f.seek(size, 1)
             key = advance_key(key, (size + 3) // 4)
         return entries
-    if version in (2, 3):
+
+
+def _parse_rgss_v3(f, version: int) -> list[dict] | None:
+    f.seek(8)
+    entries: list[dict] = []
+    if True:
         seed = _u32(f)
         key = (seed * 9 + 3) & MASK32
         keybytes = key.to_bytes(4, "little")
@@ -505,7 +527,6 @@ def parse_rgss_entries(f, version: int) -> list[dict] | None:
             entries.append({"name": name.replace("\\", "/"), "offset": offset,
                             "size": size, "key": file_key, "version": version})
         return entries
-    return None
 
 
 def extract_rgss_file(f, extra: dict) -> bytes | None:
