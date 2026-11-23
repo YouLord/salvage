@@ -68,8 +68,14 @@ class PckFile:
 class BnkFile:
     path: Path
     version: int = 0          # dwBankGeneratorVersion из BKHD
+    bank_id: int = 0
+    language: int = 0
     entries: list[WemEntry] = field(default_factory=list)
     chunks: list[tuple[str, int]] = field(default_factory=list)
+    # HIRC: только инвентарь (тип объекта → сколько), без графа событий
+    hirc_total: int = 0
+    hirc_types: dict[int, int] = field(default_factory=dict)
+    hirc_error: str = ""      # если HIRC не разобрался — честная причина
 
 
 def sniff(path: Path) -> str | None:
@@ -196,41 +202,103 @@ def _read_wide_string(data: bytes, pos: int, big_endian: bool) -> str:
 # .bnk (BKHD)
 # ---------------------------------------------------------------------------
 
+HIRC_TYPE_NAMES = {
+    1: "settings", 2: "sound", 3: "action", 4: "event", 5: "random/sequence",
+    6: "switch", 7: "actor-mixer", 8: "bus", 9: "layer", 10: "music-segment",
+    11: "music-track", 12: "music-switch", 13: "music-playlist",
+    14: "music-state", 15: "state", 16: "feedback", 17: "dialogue-event",
+    18: "motion-bus", 19: "motion-fx", 20: "effect", 21: "aux-bus",
+}
+
+
 def read_bnk(path: Path) -> BnkFile:
+    """Прочитать .bnk последовательно по чанкам: [tag:4][size:u32][payload].
+
+    Никаких предположений о фиксированных смещениях: каждый чанк читается
+    по своей длине, выход за файл — WwiseError, а не «набор правдоподобных
+    записей». DATA служит базой для offset'ов из DIDX.
+    """
     data = path.read_bytes()
     if data[:4] != BKHD_MAGIC:
         raise WwiseError("не BKHD")
     bank = BnkFile(path=path)
-    p = 0
+    # позиции payload'ов чанков (первое вхождение тега — как в реальных банках)
     chunks: dict[str, tuple[int, int]] = {}
+    p = 0
     while p + 8 <= len(data):
         tag = data[p:p + 4].decode("latin-1")
         size = struct.unpack_from("<I", data, p + 4)[0]
         body = p + 8
         if body + size > len(data):
-            raise WwiseError(f"BNK: чанк {tag} выходит за файл")
+            raise WwiseError(
+                f"BNK: чанк {tag} (смещение {p}, длина {size}) выходит за файл "
+                f"({len(data)} Б)")
         bank.chunks.append((tag, size))
-        chunks[tag] = (body, size)
+        chunks.setdefault(tag, (body, size))
         if tag == "BKHD" and size >= 8:
-            # BKHD: dwBankGeneratorVersion, затем bank_id (оба uint32 LE)
-            bank.version = struct.unpack_from("<I", data, body)[0]
+            # BKHD: dwBankGeneratorVersion (u32), затем bank_id (u32);
+            # язык/прочее — только если поле реально есть
+            bank.version, bank.bank_id = struct.unpack_from("<II", data, body)
+            if size >= 12:
+                bank.language = struct.unpack_from("<I", data, body + 8)[0]
         p = body + size
-        if tag == "BKHD" and bank.version in (0,):
-            break
-    if "DIDX" not in chunks:
-        return bank
-    didx_pos, didx_size = chunks["DIDX"]
-    data_pos = chunks.get("DATA", (0, 0))[0]
-    count = didx_size // 12
-    for i in range(count):
-        wem_id, offset, size = struct.unpack_from("<III", data, didx_pos + i * 12)
-        bank.entries.append(WemEntry(
-            wem_id=wem_id, offset=data_pos + offset, size=size,
-            source="bnk", container=path.name))
-    for e in bank.entries:
-        if e.offset + e.size > len(data):
-            raise WwiseError(f"BNK: медиа {e.wem_id} выходит за файл")
+    if "BKHD" not in chunks:
+        raise WwiseError("BNK без чанка BKHD")
+
+    # --- DIDX + DATA ---
+    if "DIDX" in chunks:
+        didx_pos, didx_size = chunks["DIDX"]
+        if didx_size % 12:
+            raise WwiseError(f"DIDX: размер {didx_size} не кратен 12")
+        if "DATA" not in chunks:
+            raise WwiseError("DIDX есть, а DATA нет — смещения некуда отсчитывать")
+        data_pos, data_size = chunks["DATA"]
+        for i in range(didx_size // 12):
+            wem_id, offset, size = struct.unpack_from("<III", data, didx_pos + i * 12)
+            if size == 0:
+                continue
+            abs_offset = data_pos + offset
+            if abs_offset + size > len(data):
+                raise WwiseError(
+                    f"BNK: медиа {wem_id} (offset {offset}, size {size}) "
+                    f"выходит за DATA/файл")
+            bank.entries.append(WemEntry(wem_id=wem_id, offset=abs_offset,
+                                         size=size, source="bnk",
+                                         container=path.name))
+
+    # --- HIRC: минимальный инвентарь ---
+    if "HIRC" in chunks:
+        hirc_pos, hirc_size = chunks["HIRC"]
+        _read_hirc_inventory(data[hirc_pos:hirc_pos + hirc_size], bank)
     return bank
+
+
+def _read_hirc_inventory(buf: bytes, bank: BnkFile) -> None:
+    """Посчитать объекты HIRC по типам (без разбора свойств и связей).
+
+    Структура: uint32 count, затем count × (uint8 type, uint32 size, payload).
+    Если длины не сходятся — фиксируем hirc_error, а не молчим.
+    """
+    if len(buf) < 4:
+        bank.hirc_error = "HIRC короче 4 байт"
+        return
+    count = struct.unpack_from("<I", buf, 0)[0]
+    p = 4
+    seen = 0
+    for _ in range(count):
+        if p + 5 > len(buf):
+            bank.hirc_error = f"HIRC обрезан: {seen} из {count} объектов"
+            break
+        obj_type = buf[p]
+        size = struct.unpack_from("<I", buf, p + 1)[0]
+        p += 5
+        if p + size > len(buf):
+            bank.hirc_error = f"HIRC: объект {seen} выходит за чанк"
+            break
+        bank.hirc_types[obj_type] = bank.hirc_types.get(obj_type, 0) + 1
+        seen += 1
+        p += size
+    bank.hirc_total = seen
 
 
 def read_wem_bytes(container: Path, entry: WemEntry) -> bytes:

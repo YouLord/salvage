@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from salvage.plugins.generic import wwise
+from salvage.core import wwise
 
 HERE = Path(__file__).resolve().parent
 FIX = HERE / "fixtures"
@@ -39,7 +39,7 @@ class TestWwise(unittest.TestCase):
         expected = json.loads((FIX / "wwise" / "expected.json").read_text("utf-8"))
         bnk = wwise.read_bnk(FIX / "wwise" / "SFX.bnk")
         self.assertEqual(bnk.version, 134)
-        self.assertEqual([c[0] for c in bnk.chunks], ["BKHD", "DIDX", "DATA"])
+        self.assertEqual([c[0] for c in bnk.chunks], ["BKHD", "DIDX", "DATA", "HIRC"])
         for e in bnk.entries:
             raw = wwise.read_wem_bytes(bnk.path, e)
             self.assertEqual(hashlib.sha256(raw).hexdigest(),
@@ -92,6 +92,86 @@ class TestWwisevsGodot(unittest.TestCase):
         self.assertEqual(asset.extra.get("foreign_pck"), "wwise")
         self.assertNotIn("pck_unrecognized", asset.extra)
         self.assertTrue(any(f.code == "wwise_pck_in_godot" for f in ds.findings))
+
+
+class TestHircAndBoundaries(unittest.TestCase):
+    """HIRC-инвентарь и честные ошибки вместо «правдоподобных» записей."""
+
+    def test_hirc_inventory(self) -> None:
+        bnk = wwise.read_bnk(FIX / "wwise" / "SFX.bnk")
+        self.assertEqual(bnk.version, 134)
+        self.assertEqual(bnk.bank_id, 0x0BADBEEF)
+        self.assertEqual(bnk.hirc_total, 3)
+        self.assertEqual(bnk.hirc_types, {2: 2, 4: 1})
+        self.assertEqual(bnk.hirc_error, "")
+
+    def test_bank_id_and_language(self) -> None:
+        bnk = wwise.read_bnk(FIX / "wwise" / "SFX.bnk")
+        self.assertEqual(bnk.language, 0)
+
+    def test_truncated_chunk_is_error(self) -> None:
+        raw = (FIX / "wwise" / "SFX.bnk").read_bytes()
+        broken = raw[:-40]                      # отрезали хвост DATA/HIRC
+        with self.assertRaises(wwise.WwiseError):
+            wwise.read_bnk(_write_tmp(self, "cut.bnk", broken))
+
+    def test_didx_without_data_is_error(self) -> None:
+        bkhd = b"BKHD" + struct.pack("<I", 8) + struct.pack("<II", 134, 7)
+        didx = b"DIDX" + struct.pack("<I", 12) + struct.pack("<III", 1, 0, 4)
+        with self.assertRaises(wwise.WwiseError):
+            wwise.read_bnk(_write_tmp(self, "nodata.bnk", bkhd + didx))
+
+    def test_media_out_of_bounds_is_error(self) -> None:
+        bkhd = b"BKHD" + struct.pack("<I", 8) + struct.pack("<II", 134, 7)
+        didx = b"DIDX" + struct.pack("<I", 12) + struct.pack("<III", 1, 0, 999)
+        data = b"DATA" + struct.pack("<I", 4) + b"abcd"
+        with self.assertRaises(wwise.WwiseError):
+            wwise.read_bnk(_write_tmp(self, "oob.bnk", bkhd + didx + data))
+
+    def test_unknown_pck_is_error(self) -> None:
+        with self.assertRaises(wwise.WwiseError):
+            wwise.read_pck(_write_tmp(self, "not.pck", b"XXXX" + bytes(64)))
+
+    def test_pck_header_size_out_of_file(self) -> None:
+        bad = b"AKPK" + struct.pack("<IIIII", 10 ** 6, 0, 0, 0, 0) + bytes(16)
+        with self.assertRaises(wwise.WwiseError):
+            wwise.read_pck(_write_tmp(self, "bad.pck", bad))
+
+
+class TestWemStatuses(unittest.TestCase):
+    def test_statuses_from_fixture(self) -> None:
+        expected = json.loads((FIX / "wwise" / "expected.json").read_text("utf-8"))
+        for name in ("Audio.pck", "SFX.bnk"):
+            container = FIX / "wwise" / name
+            reader = wwise.read_pck if name.endswith(".pck") else wwise.read_bnk
+            obj = reader(container)
+            for e in obj.entries:
+                payload = wwise.read_wem_bytes(container, e)
+                status = wwise.wem_status(payload)
+                self.assertEqual(status, expected["statuses"][str(e.wem_id)],
+                                 f"{name}:{e.wem_id}")
+
+    def test_wem_export_is_byte_exact(self) -> None:
+        expected = json.loads((FIX / "wwise" / "expected.json").read_text("utf-8"))
+        bnk = wwise.read_bnk(FIX / "wwise" / "SFX.bnk")
+        entry = bnk.entries[0]
+        payload = wwise.read_wem_bytes(FIX / "wwise" / "SFX.bnk", entry)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(),
+                         expected["pck"]["entries"][str(entry.wem_id)]["sha256"]
+                         if str(entry.wem_id) in expected["pck"]["entries"]
+                         else expected["bnk"]["entries"][str(entry.wem_id)]["sha256"])
+        self.assertEqual(payload[:4], b"RIFF", "PCM-wem должен быть RIFF")
+
+
+def _write_tmp(case: unittest.TestCase, name: str, data: bytes) -> Path:
+    import tempfile
+    d = getattr(case, "_tmpdir", None)
+    if d is None:
+        d = Path(tempfile.mkdtemp(prefix="wwise-"))
+        case._tmpdir = d
+    path = d / name
+    path.write_bytes(data)
+    return path
 
 
 if __name__ == "__main__":

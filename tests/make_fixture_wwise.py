@@ -36,7 +36,7 @@ def build(root: Path, *, with_bug: bool = False) -> Path:
     wems = {
         1001: _wem_vorbis(1),
         1002: _wem_vorbis(2),
-        2001: _wem_riff(3),
+        2001: _wem_riff(3),        # PCM в RIFF-обёртке
     }
 
     # ---------------- .pck (AKPK, версия 1) ----------------
@@ -73,7 +73,13 @@ def build(root: Path, *, with_bug: bool = False) -> Path:
     def chunk(tag: bytes, payload: bytes) -> bytes:
         return tag + struct.pack("<I", len(payload)) + payload
     bkhd = struct.pack("<II", 134, 0x0BADBEEF) + struct.pack("<I", 0)  # version, id, language
-    bnk = (chunk(b"BKHD", bkhd) + chunk(b"DIDX", didx) + chunk(b"DATA", bytes(data_blob)))
+    # HIRC: инвентарь объектов (тип 2 — sound, тип 4 — event), без свойств
+    hirc_objects = [(2, b"\x01" * 12), (2, b"\x02" * 8), (4, b"\x03" * 16)]
+    hirc = struct.pack("<I", len(hirc_objects))
+    for obj_type, payload in hirc_objects:
+        hirc += bytes([obj_type]) + struct.pack("<I", len(payload)) + payload
+    bnk = (chunk(b"BKHD", bkhd) + chunk(b"DIDX", didx)
+           + chunk(b"DATA", bytes(data_blob)) + chunk(b"HIRC", hirc))
     (root / "SFX.bnk").write_bytes(bnk)
 
     expected = {
@@ -88,6 +94,8 @@ def build(root: Path, *, with_bug: bool = False) -> Path:
             "version": 134,
         },
         "statuses": {"1001": "vorbis-wwise", "1002": "vorbis-wwise", "2001": "riff"},
+        "hirc_total": 3,
+        "hirc_types": {"2": 2, "4": 1},
     }
     (root / "expected.json").write_text(json.dumps(expected, indent=1), "utf-8")
     return root

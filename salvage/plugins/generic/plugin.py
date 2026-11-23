@@ -17,7 +17,8 @@ from ...core.plugin_base import EngineContext, EnginePlugin, note_limit
 from ...core.util import (classify, head_bytes, human_bytes, human_int, iter_files,
                           rel_posix, safe_rel, sha256_file, sniff_magic)
 from .._shared import copy_verbatim
-from . import fmod_fsb, unreal_pak, wwise
+from ...core import wwise
+from . import fmod_fsb, unreal_pak
 
 ENGINE_CLUES = {
     "unity": ("UnityPlayer.dll", "globalgamemanagers", "Managed/", "UnityEngine"),
@@ -127,13 +128,25 @@ class GenericPlugin(EnginePlugin):
                                f"{rel}: .bnk не прочитан — {exc}", path=rel)
                 continue
             totals["bnk"] += 1
-            ds.meta.setdefault("wwise_banks", []).append({
-                "file": rel, "version": bnk.version, "entries": len(bnk.entries),
-                "chunks": [c[0] for c in bnk.chunks],
-            })
+            bank_meta = {
+                "file": rel, "version": bnk.version, "bank_id": bnk.bank_id,
+                "entries": len(bnk.entries), "chunks": [c[0] for c in bnk.chunks],
+                "hirc_total": bnk.hirc_total,
+                "hirc_types": {wwise.HIRC_TYPE_NAMES.get(k, f"type-{k}"): v
+                               for k, v in sorted(bnk.hirc_types.items())},
+            }
+            if bnk.hirc_error:
+                bank_meta["hirc_error"] = bnk.hirc_error
+            ds.meta.setdefault("wwise_banks", []).append(bank_meta)
+            hirc_note = (f"HIRC: объектов {bnk.hirc_total}" if bnk.hirc_total else
+                         "HIRC отсутствует или не разобран")
+            if bnk.hirc_error:
+                ds.add_finding("warn", "wwise_hirc_error",
+                               f"{rel}: HIRC не разобран — {bnk.hirc_error}", path=rel)
             ds.add_finding("info", "wwise_bnk",
                            f"{rel}: Wwise .bnk v{bnk.version}, медиа {len(bnk.entries)}",
-                           "DIDX/DATA разобраны; HIRC (граф событий) — отдельная задача.", path=rel)
+                           f"DIDX/DATA разобраны; {hirc_note}. Граф событий — отдельная задача.",
+                           path=rel)
             for e in bnk.entries:
                 found.append(self._wwise_asset(ds, rel, p, e, totals))
         if totals["wem"]:
